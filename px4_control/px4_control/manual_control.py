@@ -1,192 +1,79 @@
-#!/usr/bin/env python3
-
-import sys,os
-
-import geometry_msgs.msg
 import rclpy
-import std_msgs.msg
-
+from rclpy.node import Node
+from std_msgs.msg import String, Bool
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+import json
+from geometry_msgs.msg import Twist
 
-if sys.platform == 'win32':
-    import msvcrt
-else:
-    import termios
-    import tty
+class ManualControl(Node):
+    def __init__(self):
+        super().__init__('manual_control')
 
+        qos_profile = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        self.pub = self.create_publisher(Twist, '/offboard_velocity_cmd', qos_profile)
 
-msg = """
-This node takes keypresses from the keyboard and publishes them
-as Twist messages. 
-Using the arrow keys and WASD you have Mode 2 RC controls.
-w: Up
-x: Down
-a: Yaw Left
-d: Yaw Right
-s: release Height/Yaw
-i: Pitch Forward
-,: Pitch Backward
-j: Roll Left
-l: Roll Right
-k: release Pitch/Roll
+        self.arm_toggle = False
+        self.arm_pub = self.create_publisher(Bool, '/arm_message', qos_profile)
 
-Press SPACE to arm/disarm the drone
-"""
+        # Create subscriber to /event/keyboard topic
+        self.subscription = self.create_subscription(
+            String,
+            '/event/keyboard',
+            self.keyboard_callback,
+            10
+        )
+        self.subscription  # Prevent unused variable warning
 
-moveBindings = {
-    'w': (0, 0, 1, 0), #Z+
-    'x': (0, 0, -1, 0),#Z-
-    'a': (0, 0, 0, -1), #Yaw+
-    'd': (0, 0, 0, 1),#Yaw-
-    'i' : (0, 1, 0, 0),  #Up Arrow
-    ',' : (0, -1, 0, 0), #Down Arrow
-    'j' : (-1, 0, 0, 0), #Right Arrow
-    'l' : (1, 0, 0, 0),  #Left Arrow
-}
+    def keyboard_callback(self, msg):
+        try:
+            key_states = json.loads(msg.data)
 
+            twist = Twist()
+            twist.linear.z = 1.0 if key_states.get("W") else (-1.0 if key_states.get("S") else 0.0)
+            twist.angular.z = 1.0 if key_states.get("D") else (-1.0 if key_states.get("A") else 0.0)
 
-speedBindings = {
-    # 'q': (1.1, 1.1),
-    # 'z': (.9, .9),
-    # 'w': (1.1, 1),
-    # 'x': (.9, 1),
-    # 'e': (1, 1.1),
-    # 'c': (1, .9),
-}
+            twist.linear.x = 1.0 if key_states.get("J") else (-1.0 if key_states.get("L") else 0.0)  # Pitch
+            twist.linear.y = 1.0 if key_states.get("I") else (-1.0 if key_states.get("K") else 0.0)  # Roll
 
+            self.pub.publish(twist)
 
-def getKey(settings):
-    if sys.platform == 'win32':
-        # getwch() returns a string on Windows
-        key = msvcrt.getwch()
-    else:
-        tty.setraw(sys.stdin.fileno())
-        # sys.stdin.read() returns a string on Linux
-        key = sys.stdin.read(1)
-        if key == '\x1b':  # if the first character is \x1b, we might be dealing with an arrow key
-            additional_chars = sys.stdin.read(2)  # read the next two characters
-            key += additional_chars  # append these characters to the key
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
-    return key
+            # Takeoff (ARM)
+            if key_states.get("SPACE") and not self.arm_toggle:
+                self.arm_toggle = True
+                self.arm_pub.publish(Bool(data=True))
+                self.get_logger().info("Takeoff (ARM) command sent")
 
+            # Land (DISARM)
+            if key_states.get("R") and self.arm_toggle:
+                self.arm_toggle = False
+                self.arm_pub.publish(Bool(data=False))
+                self.get_logger().info("Land (DISARM) command sent")
 
+            # Reset toggle when released
+            if not key_states.get("SPACE") and not key_states.get("R"):
+                self.arm_toggle = False
 
-def saveTerminalSettings():
-    if sys.platform == 'win32':
-        return None
-    return termios.tcgetattr(sys.stdin)
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f"JSON parse error: {e}")
 
+def main(args=None):
+    rclpy.init(args=args)
 
-def restoreTerminalSettings(old_settings):
-    if sys.platform == 'win32':
-        return
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-
-
-def vels(speed, turn):
-    return 'currently:\tspeed %s\tturn %s ' % (speed, turn)
-
-
-def main():
-    settings = saveTerminalSettings()
-
-    rclpy.init()
-
-    node = rclpy.create_node('teleop_twist_keyboard')
-
-    qos_profile = QoSProfile(
-        reliability=QoSReliabilityPolicy.BEST_EFFORT,
-        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        history=QoSHistoryPolicy.KEEP_LAST,
-        depth=10
-    )
-
-
-    pub = node.create_publisher(geometry_msgs.msg.Twist, '/offboard_velocity_cmd', qos_profile)
-
-    arm_toggle = False
-    arm_pub = node.create_publisher(std_msgs.msg.Bool, '/arm_message', qos_profile)
-
-
-    speed = 0.5
-    turn = .2
-    x = 0.0
-    y = 0.0
-    z = 0.0
-    th = 0.0
-    status = 0.0
-    x_val = 0.0
-    y_val = 0.0
-    z_val = 0.0
-    yaw_val = 0.0
+    manual_control = ManualControl()
 
     try:
-        print(msg)
-        # print(vels(speed, turn))
-        while True:
-            key = getKey(settings)
-            if key in moveBindings.keys():
-                x = moveBindings[key][0]
-                y = moveBindings[key][1]
-                z = moveBindings[key][2]
-                th = moveBindings[key][3]
-            
-            else:
-                x = 0.0
-                y = 0.0
-                z = 0.0
-                th = 0.0
-                if (key == '\x03'):
-                    break
-
-            if key == ' ':  # ASCII value for space
-                arm_toggle = not arm_toggle  # Flip the value of arm_toggle
-                arm_msg = std_msgs.msg.Bool()
-                arm_msg.data = arm_toggle
-                arm_pub.publish(arm_msg)
-                os.system('clear')
-                print(msg)
-                print(f"Arm toggle is now: {arm_toggle}")
-            if key == 'k':
-                x_val = 0.0
-                y_val = 0.0
-            if key == 's':
-                z_val = 0.0
-                yaw_val = 0.0
-            twist = geometry_msgs.msg.Twist()
-            
-            x_val = (x * speed) + x_val
-            y_val = (y * speed) + y_val
-            z_val = (z * speed) + z_val
-            yaw_val = (th * turn) + yaw_val
-            twist.linear.x = x_val
-            twist.linear.y = y_val
-            twist.linear.z = z_val
-            twist.angular.x = 0.0
-            twist.angular.y = 0.0
-            twist.angular.z = yaw_val
-            pub.publish(twist)
-            os.system('clear')
-            print(msg)
-            print(f"Arm toggle is now: {arm_toggle}") 
-            print("X:",twist.linear.x, "   Y:",twist.linear.y, "   Z:",twist.linear.z, "   Yaw:",twist.angular.z)
-            
-
-    except Exception as e:
-        print(e)
-
+        rclpy.spin(manual_control)
+    except KeyboardInterrupt:
+        manual_control.get_logger().info('Manual control node interrupted.')
     finally:
-        twist = geometry_msgs.msg.Twist()
-        twist.linear.x = 0.0
-        twist.linear.y = 0.0
-        twist.linear.z = 0.0
-        twist.angular.x = 0.0
-        twist.angular.y = 0.0
-        twist.angular.z = 0.0
-        pub.publish(twist)
-
-        restoreTerminalSettings(settings)
-
+        # Destroy the node explicitly
+        manual_control.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

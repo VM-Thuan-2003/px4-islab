@@ -1,0 +1,291 @@
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from std_msgs.msg import String
+from cv_bridge import CvBridge
+import cv2
+import sys
+
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QListWidget, QGridLayout, QGroupBox, QSizePolicy
+)
+from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtCore import Qt, QTimer, QObject, QEvent
+
+import json
+
+class UAVContestGUI(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.size_view = (320, 240)
+        self.max_view = (480, 320)
+        self.full_screen = True
+
+        self.setWindowTitle("UAV - AUTOPILOT - CONTEST")
+        self.setGeometry(100, 100, 1280, 720)
+        self.setStyleSheet("font-family: Arial;")
+
+        main_layout = QGridLayout()
+
+        # Title
+        title = QLabel("UAV - AUTOPILOT - CONTEST")
+        title.setStyleSheet("font-size: 26px; font-weight: bold;")
+        title.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(title, 0, 0, 1, 3)
+
+        # Left Panel
+        left_panel = QVBoxLayout()
+
+        # Time & Mode
+        self.time_label = QLabel("Time: 00:00\nMode: Manual")
+        self.time_label.setAlignment(Qt.AlignCenter)
+        self.time_label.setStyleSheet("font-size: 16px;")
+        self.auto_btn = QPushButton("Auto")
+        self.auto_btn.setStyleSheet("padding: 6px 12px; font-weight: bold;")
+
+        time_mode_group = QVBoxLayout()
+        time_mode_group.addWidget(self.time_label)
+        time_mode_group.addWidget(self.auto_btn)
+
+        time_mode_box = QGroupBox()
+        time_mode_box.setLayout(time_mode_group)
+        left_panel.addWidget(time_mode_box)
+
+        # Score
+        self.score_list_manual = QListWidget()
+        self.score_list_auto = QListWidget()
+
+        score_layout = QVBoxLayout()
+        score_layout.addWidget(QLabel("Manual"))
+        score_layout.addWidget(self.score_list_manual)
+        score_layout.addWidget(QLabel("Auto"))
+        score_layout.addWidget(self.score_list_auto)
+
+        score_box = QGroupBox("Score")
+        score_box.setLayout(score_layout)
+        score_box.setMaximumWidth(160)
+        left_panel.addWidget(score_box)
+
+        main_layout.addLayout(left_panel, 1, 0)
+
+        # Main GUI
+        # self.main_gui = QLabel("MAIN GUI")
+        # self.main_gui.setAlignment(Qt.AlignCenter)
+        # self.main_gui.setStyleSheet("font-size: 22px; font-weight: bold; border: 1px dashed gray;")
+        # self.main_gui.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # main_layout.addWidget(self.main_gui, 1, 1)
+
+        # Top View
+        self.top_view = QLabel()
+        self.set_view_size(self.top_view)
+        self.top_view.setStyleSheet("border: 2px solid black;")
+        self.top_view.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(self.top_view, 1, 1)
+
+        # Right Panel
+        right_panel = QVBoxLayout()
+        right_panel.addWidget(QLabel("<b>Front View</b>", alignment=Qt.AlignCenter))
+        self.front_view = QLabel()
+        self.set_view_size(self.front_view)
+        self.front_view.setStyleSheet("border: 2px solid black;")
+        self.front_view.setAlignment(Qt.AlignCenter)
+        right_panel.addWidget(self.front_view)
+
+        right_panel.addWidget(QLabel("<b>Down View</b>", alignment=Qt.AlignCenter))
+        self.down_view = QLabel()
+        self.set_view_size(self.down_view)
+        self.down_view.setStyleSheet("border: 2px solid black;")
+        self.down_view.setAlignment(Qt.AlignCenter)
+        right_panel.addWidget(self.down_view)
+
+        main_layout.addLayout(right_panel, 1, 2)
+
+        # Controls
+        controls = QLabel("""
+        <div style="text-align: center;">
+        <table style="margin: 0 auto; font-size: 14px;">
+            <tr><td><b>W:</b> + Throttle</td><td><b>I:</b> + Pitch</td></tr>
+            <tr><td><b>S:</b> - Throttle</td><td><b>K:</b> - Pitch</td></tr>
+            <tr><td><b>A:</b> - Yaw</td><td><b>L:</b> + Roll</td></tr>
+            <tr><td><b>D:</b> + Yaw</td><td><b>J:</b> - Roll</td></tr>
+            <tr><td><b>R:</b> Land mode</td><td><b>SPACE:</b> Takeoff</td></tr>
+        </table></div>""")
+        controls.setTextFormat(Qt.RichText)
+        controls.setAlignment(Qt.AlignCenter)
+        controls.setStyleSheet("font-size: 14px;")
+        main_layout.addWidget(controls, 2, 0, 1, 3)
+
+        self.setLayout(main_layout)
+
+    def set_view_size(self, view):
+        size = self.max_view if self.full_screen else self.size_view
+        view.setFixedSize(*size)
+
+    def update_front_view(self, image):
+        self.front_view.setPixmap(self.cv2_to_pixmap(image))
+
+    def update_down_view(self, image):
+        self.down_view.setPixmap(self.cv2_to_pixmap(image))
+    
+    def update_top_view(self, image):
+        self.top_view.setPixmap(self.cv2_to_pixmap(image))
+
+    def cv2_to_pixmap(self, cv_img):
+        rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_image.shape
+        bytes_per_line = ch * w
+        q_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        return QPixmap.fromImage(q_img).scaled(*self.size_view, Qt.KeepAspectRatio)
+
+    def set_time_mode(self, time_str: str, mode_str: str):
+        self.time_label.setText(f"Time: {time_str}\nMode: {mode_str}")
+
+    def update_scores(self, manual_scores: list, auto_scores: list):
+        self.score_list_manual.clear()
+        self.score_list_auto.clear()
+        self.score_list_manual.addItems([f"  Point {i+1}: {t}" for i, t in enumerate(manual_scores)])
+        self.score_list_auto.addItems([f"  Point {i+1}: {t}" for i, t in enumerate(auto_scores)])
+
+class Control(QObject):
+    def __init__(self, ros_node):
+        super().__init__()
+        self.ros_node = ros_node
+
+        # Define keys to monitor and their string labels
+        self.key_map = {
+            Qt.Key_W: "W",
+            Qt.Key_S: "S",
+            Qt.Key_A: "A",
+            Qt.Key_D: "D",
+            Qt.Key_Q: "Q",
+            Qt.Key_E: "E",
+            Qt.Key_I: "I",
+            Qt.Key_K: "K",
+            Qt.Key_J: "J",
+            Qt.Key_L: "L",
+            Qt.Key_T: "T",
+            Qt.Key_F: "F",
+            Qt.Key_Space: "SPACE",
+            Qt.Key_R: "R"
+        }
+
+        # Initialize all key states to False (not pressed)
+        self.key_state = {name: False for name in self.key_map.values()}
+
+        # ROS 2 publisher to /event/keyboard
+        self.publisher = ros_node.create_publisher(String, '/event/keyboard', 10)
+
+        # Timer to publish key states periodically (every 50ms)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.publish_key_states)
+        self.timer.start(50)  # 20 Hz
+
+    def eventFilter(self, obj, event):
+        # Handle key press (ignore auto-repeat)
+        if event.type() == QEvent.KeyPress and not event.isAutoRepeat():
+            key = event.key()
+            if key in self.key_map:
+                key_name = self.key_map[key]
+                self.key_state[key_name] = True
+            return True
+
+        # Handle key release (ignore auto-repeat)
+        elif event.type() == QEvent.KeyRelease and not event.isAutoRepeat():
+            key = event.key()
+            if key in self.key_map:
+                key_name = self.key_map[key]
+                self.key_state[key_name] = False
+            return True
+
+        return False
+
+    def publish_key_states(self):
+        # Convert current key states to JSON and publish to ROS 2
+        msg = String()
+        msg.data = json.dumps(self.key_state)
+        self.publisher.publish(msg)
+        # Uncomment for debugging:
+        # print(f"Published key states: {msg.data}")
+
+class GuiContest(Node):
+    def __init__(self, gui: UAVContestGUI, control: Control):
+        super().__init__('gui_contest')
+        self.gui = gui
+        self.control = control
+        self.bridge = CvBridge()
+
+        self.sub_down = self.create_subscription(Image, '/UAV/bottom/image_raw', self.callback_down, 10)
+        self.sub_front = self.create_subscription(Image, '/UAV/forward/image_raw', self.callback_front, 10)
+        self.sub_top = self.create_subscription(Image, '/top_camera/image_raw', self.callback_top, 10)
+
+        self.mode = "Manual"
+        self.elapsed_seconds = 0
+        self.timer = self.create_timer(1.0, self.timer_callback)
+    
+    def callback_top(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            self.gui.update_top_view(cv_image)
+        except Exception as e:
+            self.get_logger().error(f"Top image error: {e}")
+
+    def callback_down(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            self.gui.update_down_view(cv_image)
+        except Exception as e:
+            self.get_logger().error(f"Down image error: {e}")
+
+    def callback_front(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            self.gui.update_front_view(cv_image)
+        except Exception as e:
+            self.get_logger().error(f"Front image error: {e}")
+
+    def timer_callback(self):
+        self.elapsed_seconds += 1
+        minutes = self.elapsed_seconds // 60
+        seconds = self.elapsed_seconds % 60
+        time_str = f"{minutes:02}:{seconds:02}"
+
+        if self.elapsed_seconds % 10 == 0:
+            self.mode = "Auto" if self.mode == "Manual" else "Manual"
+
+        self.gui.set_time_mode(time_str, self.mode)
+
+        manual_scores = [f"01:{i+1:02}" for i in range(6)]
+        auto_scores = [f"02:{i+1:02}" for i in range(6)]
+        self.gui.update_scores(manual_scores, auto_scores)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    app = QApplication(sys.argv)
+
+    gui = UAVContestGUI()
+
+    node = GuiContest(gui, None)
+    control = Control(node)
+
+    gui.installEventFilter(control)
+    gui.setFocus()
+
+    node.control = control
+
+    timer = QTimer()
+    timer.timeout.connect(lambda: rclpy.spin_once(node, timeout_sec=0.01))
+    timer.start(10)
+
+    try:
+        gui.show()
+        app.exec_()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"Exception: {e}")
+
+    node.destroy_node()
+    rclpy.shutdown()

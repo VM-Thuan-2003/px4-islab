@@ -156,7 +156,7 @@ class OffboardControl(Node):
 
     # Takes off the vehicle to a user specified altitude (meters)
     def take_off(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, param1 = 1.0, param7=5.0) # param7 is altitude in meters
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, param1 = 1.0, param7=1.0) # param7 is altitude in meters
         self.get_logger().info("Takeoff command send")
 
     #publishes command to /fmu/in/vehicle_command

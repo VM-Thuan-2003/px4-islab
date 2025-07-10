@@ -19,6 +19,7 @@ setup(
         'console_scripts': [
             'pub_camera = camera.pub_camera:main',
             'read_camera = camera.read_camera:main',
+            'processing_camera = camera.processing_camera:main',
         ],
     },
 )
