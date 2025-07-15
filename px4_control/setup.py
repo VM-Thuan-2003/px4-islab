@@ -22,8 +22,8 @@ setup(
     entry_points={
         'console_scripts': [
             'auto_control = px4_control.auto_control:main',
-            'test_manual_control = px4_control.test_manual_control:main',
             'manual_control = px4_control.manual_control:main',
+            'test_manual_control = px4_control.test_manual_control:main',
             'velocity_control = px4_control.velocity_control:main',
         ],
     },

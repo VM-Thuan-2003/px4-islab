@@ -13,6 +13,13 @@ def generate_launch_description():
         ),
         Node(
             package='px4_control',
+            executable='auto_control',
+            name='auto_control',
+            output='screen',
+            prefix='gnome-terminal --geometry=65x24 --',
+        ),
+        Node(
+            package='px4_control',
             executable='velocity_control',
             name='velocity_control',
             output='screen'

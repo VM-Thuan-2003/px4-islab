@@ -8,6 +8,9 @@ from geometry_msgs.msg import Twist
 class ManualControl(Node):
     def __init__(self):
         super().__init__('manual_control')
+        self.get_logger().info('Manual control node started.')
+
+        self.mode = "Manual"
 
         qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -27,9 +30,29 @@ class ManualControl(Node):
             self.keyboard_callback,
             10
         )
+        self.subscription_mode = self.create_subscription(
+            String,
+            '/event/mode',
+            self.mode_callback,
+            10
+        )
         self.subscription  # Prevent unused variable warning
 
+    def mode_callback(self, msg):
+        try:
+            mode = msg.data
+            if mode == "Manual":
+                self.mode = "Manual"
+                self.get_logger().info("Switching to Manual mode")
+            else:
+                self.mode = "Auto"
+                self.get_logger().info("Switching to Auto mode")
+        except Exception as e:
+            self.get_logger().error(f"Error processing mode message: {e}")
+
     def keyboard_callback(self, msg):
+        if self.mode != "Manual":
+            return
         try:
             key_states = json.loads(msg.data)
 
