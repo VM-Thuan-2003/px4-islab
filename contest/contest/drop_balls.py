@@ -2,18 +2,22 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 import subprocess
-
+import os
 
 # Command test to run:
 # ros2 topic pub /drop_ball std_msgs/String "data: 'ball_2,0.1,0.0,1.0'"
 # Expected format: id,x,y,z
 # Example: 'ball_1,0.0,0.0,1.0'
 
+curr_path = os.path.dirname(os.path.abspath(__file__))
+islab_px4_path = os.path.abspath(os.path.join(curr_path, '..', '..', '..', '..', '..', '..', '..', 'islab_px4'))
+
+
 class BallSpawner(Node):
     def __init__(self):
         super().__init__('ball_spawner_shell_command')
 
-        self.sdf_path = "/mnt/WORKPACES/USER/ISLAB/contest/model/ball/ball.sdf"
+        self.sdf_path = islab_px4_path + "/contest/model/ball/ball.sdf"
 
         self.subscription = self.create_subscription(
             String,
