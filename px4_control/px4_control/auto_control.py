@@ -1,120 +1,486 @@
+from time import time
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Bool
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
-from px4_msgs.msg import VehicleStatus, VehicleLocalPosition
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+from std_msgs.msg import String
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+import json
+import math
+import numpy as np
 
+class PIDController:
+    def __init__(self, kp, ki, kd, dt, output_limits=(None, None)):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.dt = dt
+        self.integral = 0.0
+        self.previous_error = 0.0
+        self.min_output, self.max_output = output_limits
 
-class AutoControl(Node):
+    def compute(self, setpoint, measured):
+        error = setpoint - measured
+        self.integral += error * self.dt
+        derivative = (error - self.previous_error) / self.dt
+
+        output = self.kp * error + self.ki * self.integral + self.kd * derivative
+
+        # Clamp output
+        if self.max_output is not None:
+            output = min(output, self.max_output)
+        if self.min_output is not None:
+            output = max(output, self.min_output)
+
+        self.previous_error = error
+        return output
+
+class IslabControlUI(Node):
     def __init__(self):
-        super().__init__('auto_control')
-        self.get_logger().info('Auto control node started.')
+        super().__init__('islab_control_ui')
 
-        # === State ===
-        self.mode = "Manual"
-        self.armed = False
+        self.bridge = CvBridge()
+        self.control_publisher = self.create_publisher(String, '/event/islab_control', 10)
+
+        # Subscribers
+        self.create_subscription(String, '/drop_ball/state', self.drop_status_callback, 10)
+        self.create_subscription(String, '/event/islab_status', self.islab_status_callback, 10)
+        self.create_subscription(Image, '/UAV/bottom/image_raw', self.bottom_camera_callback, 10)
+        self.create_subscription(Image, '/UAV/forward/image_raw', self.forward_camera_callback, 10)
+
+        # State
+        self.is_arm = False
+        self.control_msg = "none"
+        self.flight_mode = "none"
         self.nav_state = None
-        self.arm_toggle = False
-        self.ball_dropped = False
+        self.armed_state = None
+        self.pre_arm_check = None
 
-        # === Position from /UAV/odom ===
-        self.odom_x = 0.0
-        self.odom_y = 0.0
-        self.odom_z = 0.0
+        self.drop_flags = {f"ball_{i}": False for i in range(1, 6)}
+        self.velocity_cmd = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+        self.local_position = {"x": 0.0, "y": 0.0, "z": 0.0, "vx": 0.0, "vy": 0.0, "vz": 0.0, "yaw": 0.0}
 
-        # === Movement timers ===
-        self.forward_timer = 0
-        self.forward_duration = 10 * 30  # 10 seconds @ 30Hz
-        self.fps = 30
+        self.altitude_target = 2.0  # Downward in NED frame
+        self.yaw_target = 0.0
 
-        # === QoS ===
-        qos_profile = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=10
-        )
+        self.fps = 30.0
+        self.altitude_pid = PIDController(kp=1.5, ki=0.0, kd=0.8, dt=1.0 / self.fps, output_limits=(-1.0, 1.0))
 
-        # === Publishers ===
-        self.velocity_pub = self.create_publisher(Twist, '/offboard_velocity_cmd', qos_profile)
-        self.arm_pub = self.create_publisher(Bool, '/arm_message', qos_profile)
-        self.drop_pub = self.create_publisher(String, '/drop_ball', 10)
+        self.timer_offboard_mode = self.create_timer(1.0 / self.fps, self.main_control_loop)
 
-        # === Subscribers ===
-        self.create_subscription(String, '/event/mode', self.mode_callback, 10)
-        self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
-        self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.local_position_callback, qos_profile)
-        self.create_subscription(Odometry, '/UAV/odom', self.odom_callback, 10)
+        self.get_logger().info("IslabControlUI node started.")
 
-        # === Timer loop ===
-        self.create_timer(1.0 / self.fps, self.main_autopilot_callback)
+        self.error_yellow = None
+        self.detect_yellow = False
+        self.count_yellow = 0
 
-    def mode_callback(self, msg: String):
-        self.mode = "Auto" if msg.data == "Auto" else "Manual"
-        self.get_logger().info(f"[Mode] Switched to: {self.mode}")
+        self.error_home = None
+        self.dir = False
 
-    def vehicle_status_callback(self, msg: VehicleStatus):
-        self.armed = msg.arming_state == 2
-        self.nav_state = msg.nav_state
+        self.stage_1_done = False
+        self.stage_2_done = False
+        self.take_off_done = False
 
-    def local_position_callback(self, msg: VehicleLocalPosition):
-        self.altitude = msg.z
+        self.time_check_30s = 0
 
-    def odom_callback(self, msg: Odometry):
-        self.odom_x = msg.pose.pose.position.x
-        self.odom_y = msg.pose.pose.position.y
-        self.odom_z = msg.pose.pose.position.z
-        self.get_logger().info(f"[Odom] x={self.odom_x:.2f}, y={self.odom_y:.2f}, z={self.odom_z:.2f}")
+        self.status_stage_1 = {
+            "yaw": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "forward": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "land": {
+                "time": 0.0,
+                "status": False,
+            },
+        }
+
+        self.status_stage_2 = {
+            "yaw": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "forward": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "land": {
+                "time": 0.0,
+                "status": False,
+            },
+            "drop_ball": {
+                "1": { 
+                    "time": 0.0,
+                    "status": False
+                }
+            }
+        }
+
+    def take_off(self, altitude_target=2.0):
+        if self.nav_state != 14:
+            self.select_mode("offboard")
+            return False
+        elif self.nav_state == 14:
+            if self.armed_state == 1 and self.pre_arm_check:
+                self.control_msg = "arm"
+                self.is_arm = True
+                self.send_control_message()
+                return False
+            elif self.armed_state == 2:
+                self.control_msg = "velocity"
+                current_altitude = - self.local_position.get("z", 0.0)
+                error_altitude = altitude_target - current_altitude
+                if math.fabs(error_altitude) < 0.4:
+                    self.velocity_cmd["z"] = 0.0
+                    self.send_control_message()
+                    return True
+                else:
+                    self.velocity_cmd["z"] = - self.altitude_pid.compute(altitude_target, current_altitude)
+                    self.send_control_message()
+                    return False
+            return False
+        return False
 
     def drop_ball(self, ball_id: str):
-        msg = String()
-        msg.data = f"{ball_id},{self.odom_x:.2f},{self.odom_y:.2f},{(self.odom_z-0.4):.2f}"
-        self.drop_pub.publish(msg)
-        self.get_logger().info(f"[Drop] Sent: {msg.data}")
+        self.control_msg = "ball"
+        self.drop_flags[ball_id] = True
+        self.send_control_message()
 
-    def main_autopilot_callback(self):
-        if self.mode != "Auto":
+    def deg_to_rad_per_sec(self, deg_per_sec):
+        return deg_per_sec * math.pi / 180
+
+    def stage_1(self):
+
+        ###### Take off ######
+        if not self.take_off_done:
+            self.take_off_done = self.take_off(altitude_target=self.altitude_target)
             return
+        
+        self.control_msg = "velocity"
 
-        if not self.armed and not self.arm_toggle:
-            self.get_logger().info("[ARM] Sending arm command...")
-            self.arm_pub.publish(Bool(data=True))
-            self.arm_toggle = True
+        ###### pid altitude control ######
+        current_altitude = - self.local_position.get("z", 0.0)
+        self.velocity_cmd["z"] = - self.altitude_pid.compute(self.altitude_target, current_altitude)
+        
+        if self.status_stage_1["yaw"]["1"]["status"] is False:
+            yaw_speed = 6.0
+            self.yaw_target = 72.0
+            error_yaw = self.yaw_target - self.local_position.get("yaw", 0.0)
+            if error_yaw < 0:
+                # rotate left
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(-yaw_speed)
+            elif error_yaw > 0:
+                # rotate right
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(yaw_speed)
+            if math.fabs(error_yaw) < 4.0:
+                self.velocity_cmd["yaw"] = 0.0
+                self.status_stage_1["yaw"]["1"]["status"] = True
+                self.status_stage_1["forward"]["1"]["time"] = time()
+            self.send_control_message()
             return
-
-        if self.armed and self.nav_state == 14:  # OFFBOARD
-            twist = Twist()
-
-            if self.forward_timer < self.forward_duration:
-                twist.linear.y = 0.5
-                self.forward_timer += 1
-                self.get_logger().info(f"[Action] Moving forward... {self.forward_timer / self.fps:.1f}s")
+        
+        elif self.status_stage_1["forward"]["1"]["status"] is False:
+            curr_time = time()
+            distance_target = 5.0  # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage_1["forward"]["1"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
             else:
-                if self.altitude > -0.1:
-                    twist.linear.z = 0.0
-                    if not self.ball_dropped:
-                        self.drop_ball("ball_2")
-                        self.ball_dropped = True
-                else:
-                    twist.linear.z = -0.5
-                    self.get_logger().info(f"[Action] Descending... z = {self.altitude:.2f}")
+                self.status_stage_1["forward"]["1"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_1["forward"]["1"]["status"] = True
+            self.send_control_message()
+            return
 
-            self.velocity_pub.publish(twist)
+        elif self.status_stage_1["yaw"]["2"]["status"] is False:
+            yaw_speed = 6.0
+            self.yaw_target = 115.0
+            error_yaw = self.yaw_target - self.local_position.get("yaw", 0.0)
+            if error_yaw < 0:
+                # rotate left
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(-yaw_speed)
+            elif error_yaw > 0:
+                # rotate right
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(yaw_speed)
+            if math.fabs(error_yaw) < 4.0:
+                self.velocity_cmd["yaw"] = 0.0
+                self.status_stage_1["yaw"]["2"]["status"] = True
+                self.status_stage_1["forward"]["2"]["time"] = time()
+            self.send_control_message()
+            return
+        
+        elif self.status_stage_1["forward"]["2"]["status"] is False:
+            curr_time = time()
+            distance_target = 8.0  # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage_1["forward"]["2"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage_1["forward"]["2"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_1["forward"]["2"]["status"] = True
+            self.send_control_message()
+            return
+        
+        elif self.status_stage_1["yaw"]["3"]["status"] is False:
+            yaw_speed = 6.0
+            self.yaw_target = 72.0
+            error_yaw = self.yaw_target - self.local_position.get("yaw", 0.0)
+            if error_yaw < 0:
+                # rotate left
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(-yaw_speed)
+            elif error_yaw > 0:
+                # rotate right
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(yaw_speed)
+            if math.fabs(error_yaw) < 4.0:
+                self.velocity_cmd["yaw"] = 0.0
+                self.status_stage_1["yaw"]["3"]["status"] = True
+                self.status_stage_1["forward"]["3"]["time"] = time()
+            self.send_control_message()
+            return
+        
+        elif self.status_stage_1["forward"]["3"]["status"] is False:
+            curr_time = time()
+            distance_target = 3.0  # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage_1["forward"]["3"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage_1["forward"]["3"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_1["forward"]["3"]["status"] = True
+            self.send_control_message()
+            return
+        
+        elif self.status_stage_1["land"]["status"] is False:
+            self.control_msg = "mode"
+            self.flight_mode = "land"
+            self.send_control_message()
+            if self.armed_state == 1:
+                self.stage_1_done = True
+                self.take_off_done = False
+                self.status_stage_1["land"]["status"] = True
+            return
 
+        self.send_control_message()
+
+    def stage_2(self):
+
+        ###### Take off ######
+        if not self.take_off_done:
+            self.take_off_done = self.take_off(altitude_target=self.altitude_target)
+            return
+
+        self.control_msg = "velocity"
+
+        ###### pid altitude control ######
+        current_altitude = - self.local_position.get("z", 0.0)
+        self.velocity_cmd["z"] = - self.altitude_pid.compute(self.altitude_target, current_altitude)
+        
+        if self.status_stage_2["yaw"]["1"]["status"] is False:
+            yaw_speed = 6.0
+            self.yaw_target = -90
+            error_yaw = self.yaw_target - self.local_position.get("yaw", 0.0)
+            if error_yaw < 0:
+                # rotate left
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(-yaw_speed)
+            elif error_yaw > 0:
+                # rotate right
+                self.velocity_cmd["yaw"] = self.deg_to_rad_per_sec(yaw_speed)
+            if math.fabs(error_yaw) < 4.0:
+                self.velocity_cmd["yaw"] = 0.0
+                self.status_stage_2["yaw"]["1"]["status"] = True
+                self.status_stage_2["forward"]["1"]["time"] = time()
+            self.send_control_message()
+            return
+        
+        elif self.status_stage_2["forward"]["1"]["status"] is False:
+            curr_time = time()
+            distance_target = 6.3  # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage_2["forward"]["1"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage_2["forward"]["1"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_2["forward"]["1"]["status"] = True
+                self.status_stage_2["drop_ball"]["1"]["time"] = time()
+            self.send_control_message()
+            return
+        
+        elif self.status_stage_2["drop_ball"]["1"]["status"] is False:
+            curr_time = time()
+            hold_time = 10  # seconds
+            elapsed = curr_time - self.status_stage_2["drop_ball"]["1"]["time"]
+
+            if hold_time - 4 <= elapsed <= hold_time - 3:
+                self.drop_ball("ball_1")
+            elif elapsed < hold_time:
+                pass
+            else:
+                self.status_stage_2["drop_ball"]["1"]["time"] = curr_time
+                self.status_stage_2["drop_ball"]["1"]["status"] = True
+                self.status_stage_2["forward"]["2"]["time"] = curr_time
+            self.send_control_message()
+            return
+        
+        elif self.status_stage_2["forward"]["2"]["status"] is False:
+            curr_time = time()
+            distance_target = 10.0  # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage_2["forward"]["2"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage_2["forward"]["2"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_2["forward"]["2"]["status"] = True
+            self.send_control_message()
+            return
+
+        elif self.status_stage_2["land"]["status"] is False:
+            self.control_msg = "mode"
+            self.flight_mode = "land"
+            self.send_control_message()
+            self.stage_2_done = True
+            return 
+
+        self.send_control_message()
+
+    def main_trajectory(self):
+        
+        if not self.stage_1_done:
+            self.stage_1()
+            return
+        
+        if not self.stage_2_done:
+            self.stage_2()
+            return
+    
+    def select_mode(self, mode):
+        self.control_msg = "mode"
+        self.flight_mode = mode
+        self.send_control_message()
+    
+    def main_control_loop(self):
+        self.main_trajectory()
+
+    def send_control_message(self):
+        control_msg = {
+            "arm": self.is_arm,
+            "control": self.control_msg,
+            "mode": self.flight_mode,
+            "drop_ball": self.drop_flags,
+            "velocity": self.velocity_cmd
+        }
+        msg = String()
+        msg.data = json.dumps(control_msg)
+        self.control_publisher.publish(msg)
+
+    def drop_status_callback(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            # self.get_logger().info(f"[Drop Status] {data}")
+        except json.JSONDecodeError:
+            self.get_logger().error("[Drop Status] Invalid JSON")
+
+    def islab_status_callback(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            self.nav_state = data.get("nav_state")
+            self.armed_state = data.get("arming_state")
+            self.pre_arm_check = data.get("pre_arm_check")
+
+            local = data.get("local_position", {})
+            for key in self.local_position:
+                self.local_position[key] = local.get(key, 0.0)
+
+            # self.get_logger().info(
+            #     f"[Status] Nav:{self.nav_state} Arm:{self.armed_state} Pre:{self.pre_arm_check} | "
+            #     f"Z:{- self.local_position['z']:.2f} Vz:{self.local_position['vz']:.2f}"
+            # )
+        except json.JSONDecodeError:
+            self.get_logger().error("[Status] Invalid JSON")
+
+    def bottom_camera_callback(self, msg: Image):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv2.imshow("Bottom Camera", cv_image)
+            cv2.waitKey(1)
+        except Exception as e:
+            self.get_logger().error(f"[Camera Bottom] {e}")
+
+    def forward_camera_callback(self, msg: Image):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv2.imshow("Forward Camera", cv_image)
+            cv2.waitKey(1)
+        except Exception as e:
+            self.get_logger().error(f"[Camera Forward] {e}")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = AutoControl()
+    node = IslabControlUI()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("AutoControl node interrupted.")
+        node.get_logger().info("IslabControlUI interrupted.")
     finally:
+        cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

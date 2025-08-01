@@ -27,6 +27,7 @@ setup(
             'pipeline = contest.pipeline:main',
             'drop_balls = contest.drop_balls:main',
             'gui = contest.gui:main',
+            'test_contact = contest.test_contact:main',
         ],
     },
 )

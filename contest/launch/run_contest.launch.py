@@ -6,7 +6,7 @@ from launch.substitutions import PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 model = 'islab_contest'
-world = 'contest_1'
+world = 'test_1'
 
 def generate_launch_description():
     return LaunchDescription([
@@ -15,7 +15,7 @@ def generate_launch_description():
                 PathJoinSubstitution([
                     FindPackageShare('px4_control'),
                     'launch',
-                    'merge_control.launch.py'
+                    'islab_control.launch.py'
                 ])
             )
         ),
@@ -26,12 +26,12 @@ def generate_launch_description():
             output='screen',
             arguments=[model, world],
         ),
-        Node(
-            package='contest',
-            executable='gui',
-            name='gui',
-            output='screen',
-        ),
+        # Node(
+        #     package='contest',
+        #     executable='gui',
+        #     name='gui',
+        #     output='screen',
+        # ),
         Node(
             package='contest',
             executable='drop_balls',

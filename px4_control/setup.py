@@ -25,6 +25,7 @@ setup(
             'manual_control = px4_control.manual_control:main',
             'test_manual_control = px4_control.test_manual_control:main',
             'velocity_control = px4_control.velocity_control:main',
+            'islab_control = px4_control.islab_control:main',
         ],
     },
 )

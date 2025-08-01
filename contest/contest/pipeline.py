@@ -36,7 +36,7 @@ class Pipeline(Node):
 def main(args=None):
     parser = argparse.ArgumentParser(description='Run PX4 SITL and associated tools.')
     parser.add_argument('--model', type=str, default='islab_contest', help='Model to use in the simulation')
-    parser.add_argument('--world', type=str, default='contest_1', help='World to use in the simulation')
+    parser.add_argument('--world', type=str, default='test_1', help='World to use in the simulation')
     parsed_args, _ = parser.parse_known_args()
 
     rclpy.init(args=args)
