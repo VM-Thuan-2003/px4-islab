@@ -1,0 +1,4 @@
+[submodule "src/islab_msgs/px4_msgs"]
+	path = src/islab_msgs/px4_msgs
+	url = https://github.com/PX4/px4_msgs.git
+	branch = release/1.15

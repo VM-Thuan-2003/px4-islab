@@ -1,7 +1,18 @@
+**/build/
+**/install/
+**/log/
+**/test/
 
-/build
-/install
-/log
+**/__pycache__/
+*.pyc
 
-# Local Python package cache
-__pycache__
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+
+.vscode/
+*.code-workspace
+
+.DS_Store
+Thumbs.db

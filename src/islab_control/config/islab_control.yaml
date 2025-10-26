@@ -1,0 +1,13 @@
+islab_main_node:
+  ros__parameters:
+    vehicle_id: "islab"
+    sub:
+      topic_velocity: "islab/velocity"
+      topic_change_mode: "islab/change_mode"
+      topic_attitude: "/fmu/out/vehicle_attitude"
+      topic_global_position: "/fmu/out/vehicle_global_position"
+      topic_odometry: "/fmu/out/vehicle_odometry"
+    pub:
+      offboard_control_node: "/fmu/in/offboard_control_mode"
+      vehicle_command: "/fmu/in/vehicle_command"
+      tracjectory_setpoint: "/fmu/in/trajectory_setpoint"
