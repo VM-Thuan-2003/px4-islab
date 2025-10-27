@@ -15,5 +15,12 @@ def generate_launch_description():
             name='main',
             output='screen',
             parameters=[islab_control_yaml],
+        ),
+        Node(
+            package='islab_control',
+            executable='auto_control',
+            name='auto_control',
+            output='screen',
+            # parameters=[islab_control_yaml],
         )
     ])

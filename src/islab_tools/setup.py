@@ -9,7 +9,7 @@ config_files = glob.glob('config/*.yaml')
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(exclude=['test']),
+    packages=find_packages(exclude=['test','model']),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -33,6 +33,7 @@ setup(
             'gui = islab_tools.gui:main',
             'bridge = islab_tools.bridge:main',
             'drop_ball = islab_tools.drop_ball:main',
+            'test_drop_ball = islab_tools.test_drop:main'
         ],
     },
 )

@@ -30,7 +30,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'main = islab_control.main:main'
+            'main = islab_control.main:main',
+            'auto_control = islab_control.auto_control:main'
         ],
     },
 )

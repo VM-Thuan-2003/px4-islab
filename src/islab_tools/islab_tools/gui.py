@@ -35,7 +35,7 @@ HANDLE = [
 
 class IslabChangeModePublisher(Node):
     def __init__(self):
-        super().__init__('hyp_change_mode_publisher')
+        super().__init__('islab_change_mode_publisher')
 
         self.qos_profile_pub = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -132,7 +132,7 @@ class ModeChangerGUI(QWidget):
     def __init__(self, ros_node):
         super().__init__()
         self.ros_node = ros_node
-        self.setWindowTitle("Hyp Change Mode & Control Publisher")
+        self.setWindowTitle("Islab Change Mode & Control Publisher")
         self.setGeometry(300, 300, 510, 600)
         layout = QVBoxLayout()
 

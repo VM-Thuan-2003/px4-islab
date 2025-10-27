@@ -34,7 +34,6 @@ class IslabMain(Node):
         # Pass list of IslabVariable objects to Islab
         self.islab = Islab(self, config_vars, logger=self.get_logger())
 
-
 def main(args=None):
     rclpy.init(args=args)
     node = IslabMain()
