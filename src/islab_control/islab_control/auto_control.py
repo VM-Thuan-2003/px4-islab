@@ -88,7 +88,7 @@ class IslabAutoControl(Node):
         self.altitude_target = 2.0
         self.fps = 200.0 
         
-        self.status_stage_2 = {
+        self.status_stage = {
             "yaw": {
                 "1": {
                     "time": 0.0,
@@ -264,7 +264,7 @@ class IslabAutoControl(Node):
         current_altitude = - self.local_position.z
         self.velocity_cmd["z"] = - self.altitude_pid.compute(self.altitude_target, current_altitude)
         
-        if self.status_stage_2["yaw"]["1"]["status"] is False:
+        if self.status_stage["yaw"]["1"]["status"] is False:
             yaw_speed = 6
             self.yaw_target = 90
             error_yaw = self.yaw_target - math.degrees(self.local_position.heading)
@@ -276,131 +276,190 @@ class IslabAutoControl(Node):
                 self.velocity_cmd["yaw"] = yaw_speed
             if math.fabs(error_yaw) < 4.0:
                 self.velocity_cmd["yaw"] = 0.0
-                self.status_stage_2["yaw"]["1"]["status"] = True
-                self.status_stage_2["forward"]["1"]["time"] = time()
+                self.status_stage["yaw"]["1"]["status"] = True
+                self.status_stage["forward"]["1"]["time"] = time()
             self.send_velocity()
             return
-        elif self.status_stage_2["forward"]["1"]["status"] is False:
+        elif self.status_stage["forward"]["1"]["status"] is False:
             curr_time = time()
             distance_target = 5.4  # meters
             velocity_forward = 0.5 # m/s
-            if curr_time - self.status_stage_2["forward"]["1"]["time"] < distance_target / velocity_forward:
+            if curr_time - self.status_stage["forward"]["1"]["time"] < distance_target / velocity_forward:
                 self.velocity_cmd["x"] = - velocity_forward
                 self.velocity_cmd["y"] = 0.0
             else:
-                self.status_stage_2["forward"]["1"]["time"] = curr_time
+                self.status_stage["forward"]["1"]["time"] = curr_time
                 self.velocity_cmd["x"] = 0.0
                 self.velocity_cmd["y"] = 0.0
-                self.status_stage_2["forward"]["1"]["status"] = True
-                self.status_stage_2["drop_ball"]["1"]["time"] = time()
+                self.status_stage["forward"]["1"]["status"] = True
+                self.status_stage["drop_ball"]["1"]["time"] = time()
             self.send_velocity()
             return
-        elif self.status_stage_2["drop_ball"]["1"]["status"] is False:
+        elif self.status_stage["drop_ball"]["1"]["status"] is False:
             curr_time = time()
             hold_time = 10  # seconds
-            elapsed = curr_time - self.status_stage_2["drop_ball"]["1"]["time"]
+            elapsed = curr_time - self.status_stage["drop_ball"]["1"]["time"]
 
             if hold_time - 4 <= elapsed <= hold_time - 3:
                 self.drop_ball(1)
             elif elapsed < hold_time:
                 pass
             else:
-                self.status_stage_2["drop_ball"]["1"]["time"] = curr_time
-                self.status_stage_2["drop_ball"]["1"]["status"] = True
-                self.status_stage_2["forward"]["2"]["time"] = curr_time
+                self.status_stage["drop_ball"]["1"]["time"] = curr_time
+                self.status_stage["drop_ball"]["1"]["status"] = True
+                self.status_stage["forward"]["2"]["time"] = curr_time
             self.send_velocity()
             return
-        elif self.status_stage_2["forward"]["2"]["status"] is False:
+        elif self.status_stage["forward"]["2"]["status"] is False:
             curr_time = time()
             distance_target = 3.3 # meters
             velocity_forward = 0.5 # m/s
-            if curr_time - self.status_stage_2["forward"]["2"]["time"] < distance_target / velocity_forward:
+            if curr_time - self.status_stage["forward"]["2"]["time"] < distance_target / velocity_forward:
                 self.velocity_cmd["x"] = - velocity_forward
                 self.velocity_cmd["y"] = 0.0
             else:
-                self.status_stage_2["forward"]["2"]["time"] = curr_time
+                self.status_stage["forward"]["2"]["time"] = curr_time
                 self.velocity_cmd["x"] = 0.0
                 self.velocity_cmd["y"] = 0.0
-                self.status_stage_2["forward"]["2"]["status"] = True
-                self.status_stage_2["drop_ball"]["2"]["time"] = time()
+                self.status_stage["forward"]["2"]["status"] = True
+                self.status_stage["drop_ball"]["2"]["time"] = time()
             self.send_velocity()
             return
-        elif self.status_stage_2["drop_ball"]["2"]["status"] is False:
+        elif self.status_stage["drop_ball"]["2"]["status"] is False:
             curr_time = time()
             hold_time = 10  # seconds
-            elapsed = curr_time - self.status_stage_2["drop_ball"]["2"]["time"]
+            elapsed = curr_time - self.status_stage["drop_ball"]["2"]["time"]
 
             if hold_time - 4 <= elapsed <= hold_time - 3:
                 self.drop_ball(2)
             elif elapsed < hold_time:
                 pass
             else:
-                self.status_stage_2["drop_ball"]["2"]["time"] = curr_time
-                self.status_stage_2["drop_ball"]["2"]["status"] = True
-                self.status_stage_2["left"]["1"]["time"] = curr_time
+                self.status_stage["drop_ball"]["2"]["time"] = curr_time
+                self.status_stage["drop_ball"]["2"]["status"] = True
+                self.status_stage["left"]["1"]["time"] = time()
             self.send_velocity()
             return
-        elif self.status_stage_2["left"]["1"]["status"] is False:
+        elif self.status_stage["left"]["1"]["status"] is False:
             curr_time = time()
             distance_target = 2.5 # meters
             velocity_left = 0.5 # m/s
-            if curr_time - self.status_stage_2["left"]["1"]["time"] < distance_target / velocity_left:
+            if curr_time - self.status_stage["left"]["1"]["time"] < distance_target / velocity_left:
                 self.velocity_cmd["x"] = 0.0
                 self.velocity_cmd["y"] = velocity_left
             else:
-                self.status_stage_2["left"]["1"]["time"] = curr_time
+                self.status_stage["left"]["1"]["time"] = curr_time
                 self.velocity_cmd["x"] = 0.0
                 self.velocity_cmd["y"] = 0.0
-                self.status_stage_2["left"]["1"]["status"] = True
-                self.status_stage_2["drop_ball"]["3"]["time"] = time()
+                self.status_stage["left"]["1"]["status"] = True
+                self.status_stage["drop_ball"]["3"]["time"] = time()
             self.send_velocity()
             return
-        elif self.status_stage_2["drop_ball"]["3"]["status"] is False:
+        elif self.status_stage["drop_ball"]["3"]["status"] is False:
             curr_time = time()
             hold_time = 10  # seconds
-            elapsed = curr_time - self.status_stage_2["drop_ball"]["3"]["time"]
+            elapsed = curr_time - self.status_stage["drop_ball"]["3"]["time"]
 
             if hold_time - 4 <= elapsed <= hold_time - 3:
                 self.drop_ball(3)
             elif elapsed < hold_time:
                 pass
             else:
-                self.status_stage_2["drop_ball"]["3"]["time"] = curr_time
-                self.status_stage_2["drop_ball"]["3"]["status"] = True
-                self.status_stage_2["right"]["1"]["time"] = curr_time
+                self.status_stage["drop_ball"]["3"]["time"] = curr_time
+                self.status_stage["drop_ball"]["3"]["status"] = True
+                self.status_stage["right"]["1"]["time"] = time()
             self.send_velocity()
             return
-        elif self.status_stage_2["right"]["1"]["status"] is False:
+        elif self.status_stage["right"]["1"]["status"] is False:
             curr_time = time()
-            distance_target = 5.5 # meters
-            velocity_right = -0.5 # m/s
-            if curr_time - self.status_stage_2["right"]["1"]["time"] < distance_target / velocity_right:
+            distance_target = 6 # meters
+            velocity_right = 0.5 # m/s
+            if curr_time - self.status_stage["right"]["1"]["time"] < distance_target / velocity_right:
                 self.velocity_cmd["x"] = 0.0
-                self.velocity_cmd["y"] = velocity_right
+                self.velocity_cmd["y"] = - velocity_right
             else:
-                self.status_stage_2["right"]["1"]["time"] = curr_time
+                self.status_stage["right"]["1"]["time"] = curr_time
                 self.velocity_cmd["x"] = 0.0
                 self.velocity_cmd["y"] = 0.0
-                self.status_stage_2["right"]["1"]["status"] = True
-                self.status_stage_2["drop_ball"]["4"]["time"] = time()
+                self.status_stage["right"]["1"]["status"] = True
+                self.status_stage["drop_ball"]["4"]["time"] = time()
             self.send_velocity()
             return
-        elif self.status_stage_2["drop_ball"]["4"]["status"] is False:
+        elif self.status_stage["drop_ball"]["4"]["status"] is False:
             curr_time = time()
             hold_time = 10  # seconds
-            elapsed = curr_time - self.status_stage_2["drop_ball"]["4"]["time"]
+            elapsed = curr_time - self.status_stage["drop_ball"]["4"]["time"]
 
             if hold_time - 4 <= elapsed <= hold_time - 3:
                 self.drop_ball(4)
             elif elapsed < hold_time:
                 pass
             else:
-                self.status_stage_2["drop_ball"]["4"]["time"] = curr_time
-                self.status_stage_2["drop_ball"]["4"]["status"] = True
-                # self.status_stage_2["right"]["1"]["time"] = curr_time
+                self.status_stage["drop_ball"]["4"]["time"] = curr_time
+                self.status_stage["drop_ball"]["4"]["status"] = True
+                self.status_stage["left"]["2"]["time"] = curr_time
             self.send_velocity()
             return
-        elif self.status_stage_2["land"]["status"] is False:
+        elif self.status_stage["left"]["2"]["status"] is False:
+            curr_time = time()
+            distance_target = 2.5 # meters
+            velocity_left = 0.5 # m/s
+            if curr_time - self.status_stage["left"]["2"]["time"] < distance_target / velocity_left:
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = velocity_left
+            else:
+                self.status_stage["left"]["2"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage["left"]["2"]["status"] = True
+                self.status_stage["forward"]["3"]["time"] = time()
+            self.send_velocity()
+            return
+        elif self.status_stage["forward"]["3"]["status"] is False:
+            curr_time = time()
+            distance_target = 3.3 # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage["forward"]["3"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage["forward"]["3"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage["forward"]["3"]["status"] = True
+                self.status_stage["drop_ball"]["5"]["time"] = time()
+            self.send_velocity()
+            return
+        elif self.status_stage["drop_ball"]["5"]["status"] is False:
+            curr_time = time()
+            hold_time = 10  # seconds
+            elapsed = curr_time - self.status_stage["drop_ball"]["5"]["time"]
+
+            if hold_time - 4 <= elapsed <= hold_time - 3:
+                self.drop_ball(5)
+            elif elapsed < hold_time:
+                pass
+            else:
+                self.status_stage["drop_ball"]["5"]["time"] = curr_time
+                self.status_stage["drop_ball"]["5"]["status"] = True
+                self.status_stage["forward"]["4"]["time"] = curr_time
+            self.send_velocity()
+            return
+        elif self.status_stage["forward"]["4"]["status"] is False:
+            curr_time = time()
+            distance_target = 1.7 # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage["forward"]["4"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage["forward"]["4"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage["forward"]["4"]["status"] = True
+            self.send_velocity()
+            return
+        elif self.status_stage["land"]["status"] is False:
             self.send_change_mode(mode=6, handel=0)
             self.stage_2_done = True
             return 
