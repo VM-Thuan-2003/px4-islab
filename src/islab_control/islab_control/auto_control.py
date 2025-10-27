@@ -4,9 +4,11 @@ from rclpy.node import Node
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from islab_msgs.msg import IslabControl, IslabChangeMode, IslabDropBall, StatusDropBall
+from px4_msgs.msg import VehicleControlMode, VehicleLocalPosition, VehicleStatus
 import numpy as np
 import math
 import cv2
+from time import time
 
 class PIDController:
     def __init__(self, kp, ki, kd, dt, output_limits=(None, None)):
@@ -37,11 +39,18 @@ class PIDController:
 class IslabAutoControl(Node):
     def __init__(self):
         super().__init__("islab_auto_node")
-        self.get_logger().info("Hello ROS 2!")
+        self.get_logger().info("Islab Auto Node")
         
         self.bridge = CvBridge()
         
         self.qos_profile_pub = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        
+        self.qos_profile_sub = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -57,18 +66,366 @@ class IslabAutoControl(Node):
         self.create_subscription(StatusDropBall, '/islab/status_dropball', self.drop_status_callback, 10)
         self.create_subscription(Image, '/UAV/bottom/image_raw', self.bottom_camera_callback, 10)
         self.create_subscription(Image, '/UAV/forward/image_raw', self.forward_camera_callback, 10)
-
+        self.create_subscription(VehicleControlMode, '/fmu/out/vehicle_control_mode', self.status_callback, self.qos_profile_sub)
+        self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.status_vehicle_callback, self.qos_profile_sub)
+        self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.status_mode_callback, self.qos_profile_sub)
+        
         self.frame_down = None
         self.frame_forward = None
 
         self.ball_ids = [1, 2, 3, 4, 5]
         self.ball_dropped = [False, False, False, False, False]
         
+        self.local_position = {"x": 0.0, "y": 0.0, "z": 0.0, "vx": 0.0, "vy": 0.0, "vz": 0.0, "yaw": 0.0}
         self.drop_flags = {f"ball_{i}": False for i in range(1, 6)}
         self.velocity_cmd = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
         
+        self.yaw_target = -90
+        self.nav_state = None
+        self.armed = False
+        self.action_onboard = False
+        self.take_off_done = False
+        self.altitude_target = 2.0
+        self.fps = 200.0 
+        
+        self.status_stage_2 = {
+            "yaw": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "forward": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "4": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "5": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "left": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "4": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "5": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "right": {
+                "1": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "2": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "3": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "4": {
+                    "time": 0.0,
+                    "status": False,
+                },
+                "5": {
+                    "time": 0.0,
+                    "status": False,
+                },
+            },
+            "land": {
+                "time": 0.0,
+                "status": False,
+            },
+            "drop_ball": {
+                "1": { 
+                    "time": 0.0,
+                    "status": False
+                },
+                "2": { 
+                    "time": 0.0,
+                    "status": False
+                },
+                "3": { 
+                    "time": 0.0,
+                    "status": False
+                },
+                "4": { 
+                    "time": 0.0,
+                    "status": False
+                },
+                "5": { 
+                    "time": 0.0,
+                    "status": False
+                }
+            }
+        }
+        
+        self.altitude_pid = PIDController(kp=1.5, ki=0.0, kd=0.8, dt=1.0 / self.fps, output_limits=(-1.0, 1.0))
+        self.create_timer(1.0/self.fps, self.main)
+    
+    def send_velocity(self):
+        msg = IslabControl()
+        msg.vx = float(self.velocity_cmd["x"])
+        msg.vy = float(self.velocity_cmd["y"])
+        msg.vz = float(self.velocity_cmd["z"])
+        msg.vyaw = float(self.velocity_cmd["yaw"])
+        self.velocity_publisher.publish(msg)
+    
+    def send_change_mode(self, mode = 2, altitude = 2.0, arm = False, handel = 0, source = 0):
+        msg = IslabChangeMode()
+        msg.timestamp = self.get_clock().now().nanoseconds
+        msg.timestamp_sample = self.get_clock().now().nanoseconds
+        msg.mode = mode
+        msg.altitude = altitude
+        msg.arm = arm
+        msg.handel = handel
+        msg.source = source
+        self.change_mode_publisher.publish(msg)
+    
+    def deg_to_rad_per_sec(self, deg_per_sec):
+        return deg_per_sec * math.pi / 180
+    
+    def drop_ball(self, ball_id = 1):
+        msg = IslabDropBall()
+        msg.timestamp = self.get_clock().now().nanoseconds
+        msg.timestamp_sample = msg.timestamp
+
+        drop_ball = self.ball_dropped
+        num_drop = ball_id - 1
+        drop_ball[num_drop] = True
+        
+        msg.ball_id = self.ball_ids
+        msg.drop = drop_ball
+
+        self.ball_publisher.publish(msg)
+    
+    def take_off_control(self, altitude_target = 2.0):
+        
+        ############# arm ###################
+        if self.armed is not True:
+            self.send_change_mode(arm = True, handel = 2)
+        
+        ############# takeoff ###################
+        if self.action_onboard is not True:
+            self.send_change_mode(altitude = altitude_target, handel = 1)
+        
+        current_altitude = - self.local_position.z
+        error_altitude = altitude_target - current_altitude
+        
+        if math.fabs(error_altitude) < 0.4 or current_altitude > altitude_target:
+            for i in range(10):
+                self.send_change_mode(mode=4, handel=0)
+            return True
+        else:
+            return False
+    
+    def process(self):
+        if not self.take_off_done:
+            self.take_off_done = self.take_off_control(altitude_target=self.altitude_target)
+            return
+        
+        current_altitude = - self.local_position.z
+        self.velocity_cmd["z"] = - self.altitude_pid.compute(self.altitude_target, current_altitude)
+        
+        if self.status_stage_2["yaw"]["1"]["status"] is False:
+            yaw_speed = 6
+            self.yaw_target = 90
+            error_yaw = self.yaw_target - math.degrees(self.local_position.heading)
+            if error_yaw < 0:
+                # rotate left
+                self.velocity_cmd["yaw"] = -yaw_speed
+            elif error_yaw > 0:
+                # rotate right
+                self.velocity_cmd["yaw"] = yaw_speed
+            if math.fabs(error_yaw) < 4.0:
+                self.velocity_cmd["yaw"] = 0.0
+                self.status_stage_2["yaw"]["1"]["status"] = True
+                self.status_stage_2["forward"]["1"]["time"] = time()
+            self.send_velocity()
+            return
+        elif self.status_stage_2["forward"]["1"]["status"] is False:
+            curr_time = time()
+            distance_target = 5.4  # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage_2["forward"]["1"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage_2["forward"]["1"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_2["forward"]["1"]["status"] = True
+                self.status_stage_2["drop_ball"]["1"]["time"] = time()
+            self.send_velocity()
+            return
+        elif self.status_stage_2["drop_ball"]["1"]["status"] is False:
+            curr_time = time()
+            hold_time = 10  # seconds
+            elapsed = curr_time - self.status_stage_2["drop_ball"]["1"]["time"]
+
+            if hold_time - 4 <= elapsed <= hold_time - 3:
+                self.drop_ball(1)
+            elif elapsed < hold_time:
+                pass
+            else:
+                self.status_stage_2["drop_ball"]["1"]["time"] = curr_time
+                self.status_stage_2["drop_ball"]["1"]["status"] = True
+                self.status_stage_2["forward"]["2"]["time"] = curr_time
+            self.send_velocity()
+            return
+        elif self.status_stage_2["forward"]["2"]["status"] is False:
+            curr_time = time()
+            distance_target = 3.3 # meters
+            velocity_forward = 0.5 # m/s
+            if curr_time - self.status_stage_2["forward"]["2"]["time"] < distance_target / velocity_forward:
+                self.velocity_cmd["x"] = - velocity_forward
+                self.velocity_cmd["y"] = 0.0
+            else:
+                self.status_stage_2["forward"]["2"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_2["forward"]["2"]["status"] = True
+                self.status_stage_2["drop_ball"]["2"]["time"] = time()
+            self.send_velocity()
+            return
+        elif self.status_stage_2["drop_ball"]["2"]["status"] is False:
+            curr_time = time()
+            hold_time = 10  # seconds
+            elapsed = curr_time - self.status_stage_2["drop_ball"]["2"]["time"]
+
+            if hold_time - 4 <= elapsed <= hold_time - 3:
+                self.drop_ball(2)
+            elif elapsed < hold_time:
+                pass
+            else:
+                self.status_stage_2["drop_ball"]["2"]["time"] = curr_time
+                self.status_stage_2["drop_ball"]["2"]["status"] = True
+                self.status_stage_2["left"]["1"]["time"] = curr_time
+            self.send_velocity()
+            return
+        elif self.status_stage_2["left"]["1"]["status"] is False:
+            curr_time = time()
+            distance_target = 2.5 # meters
+            velocity_left = 0.5 # m/s
+            if curr_time - self.status_stage_2["left"]["1"]["time"] < distance_target / velocity_left:
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = velocity_left
+            else:
+                self.status_stage_2["left"]["1"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_2["left"]["1"]["status"] = True
+                self.status_stage_2["drop_ball"]["3"]["time"] = time()
+            self.send_velocity()
+            return
+        elif self.status_stage_2["drop_ball"]["3"]["status"] is False:
+            curr_time = time()
+            hold_time = 10  # seconds
+            elapsed = curr_time - self.status_stage_2["drop_ball"]["3"]["time"]
+
+            if hold_time - 4 <= elapsed <= hold_time - 3:
+                self.drop_ball(3)
+            elif elapsed < hold_time:
+                pass
+            else:
+                self.status_stage_2["drop_ball"]["3"]["time"] = curr_time
+                self.status_stage_2["drop_ball"]["3"]["status"] = True
+                self.status_stage_2["right"]["1"]["time"] = curr_time
+            self.send_velocity()
+            return
+        elif self.status_stage_2["right"]["1"]["status"] is False:
+            curr_time = time()
+            distance_target = 5.5 # meters
+            velocity_right = -0.5 # m/s
+            if curr_time - self.status_stage_2["right"]["1"]["time"] < distance_target / velocity_right:
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = velocity_right
+            else:
+                self.status_stage_2["right"]["1"]["time"] = curr_time
+                self.velocity_cmd["x"] = 0.0
+                self.velocity_cmd["y"] = 0.0
+                self.status_stage_2["right"]["1"]["status"] = True
+                self.status_stage_2["drop_ball"]["4"]["time"] = time()
+            self.send_velocity()
+            return
+        elif self.status_stage_2["drop_ball"]["4"]["status"] is False:
+            curr_time = time()
+            hold_time = 10  # seconds
+            elapsed = curr_time - self.status_stage_2["drop_ball"]["4"]["time"]
+
+            if hold_time - 4 <= elapsed <= hold_time - 3:
+                self.drop_ball(4)
+            elif elapsed < hold_time:
+                pass
+            else:
+                self.status_stage_2["drop_ball"]["4"]["time"] = curr_time
+                self.status_stage_2["drop_ball"]["4"]["status"] = True
+                # self.status_stage_2["right"]["1"]["time"] = curr_time
+            self.send_velocity()
+            return
+        elif self.status_stage_2["land"]["status"] is False:
+            self.send_change_mode(mode=6, handel=0)
+            self.stage_2_done = True
+            return 
     def main(self):
-        pass
+        if self.nav_state == 14 or self.nav_state == 17 or self.nav_state == 4:
+            self.process()
+
+    def status_mode_callback(self, msg:VehicleStatus):
+        try:
+            self.nav_state = msg.nav_state
+        except Exception as e:
+            self.get_logger().error(f"[Status Mode] {e}") 
+    
+    def status_vehicle_callback(self, msg:VehicleLocalPosition):
+        try:
+            self.local_position = msg
+        except Exception as e:
+            self.get_logger().error(f"[Status Vehicle] {e}") 
+    
+    def status_callback(self, msg:VehicleControlMode):
+        try:
+            self.armed = msg.flag_armed
+            self.action_onboard = msg.flag_control_auto_enabled
+        except Exception as e:
+            self.get_logger().error(f"[Status Vehicle Control] {e}") 
     
     def drop_status_callback(self, msg: StatusDropBall):
         try:
