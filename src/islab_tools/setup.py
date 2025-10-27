@@ -33,7 +33,7 @@ setup(
             'gui = islab_tools.gui:main',
             'bridge = islab_tools.bridge:main',
             'drop_ball = islab_tools.drop_ball:main',
-            'test_drop_ball = islab_tools.test_drop:main'
+            'score = islab_tools.score:main',
         ],
     },
 )

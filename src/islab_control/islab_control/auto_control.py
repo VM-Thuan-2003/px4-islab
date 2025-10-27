@@ -462,7 +462,8 @@ class IslabAutoControl(Node):
         elif self.status_stage["land"]["status"] is False:
             self.send_change_mode(mode=6, handel=0)
             self.stage_2_done = True
-            return 
+            return
+
     def main(self):
         if self.nav_state == 14 or self.nav_state == 17 or self.nav_state == 4:
             self.process()
