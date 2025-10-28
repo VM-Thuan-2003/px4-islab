@@ -4,7 +4,7 @@ package_name = 'islab_bringup'
 
 import glob
 launch_files = glob.glob('launch/*.py')
-config_files = glob.glob('configs/*.yaml')
+config_files = glob.glob('config/*.yaml')
 
 setup(
     name=package_name,
