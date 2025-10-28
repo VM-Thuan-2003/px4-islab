@@ -16,11 +16,11 @@ def generate_launch_description():
             output='log',
             parameters=[islab_control_yaml],
         ),
-        # Node(
-        #     package='islab_control',
-        #     executable='auto_control',
-        #     name='auto_control',
-        #     output='log',
-        #     # parameters=[islab_control_yaml],
-        # )
+        Node(
+            package='islab_control',
+            executable='auto_control',
+            name='auto_control',
+            output='log',
+            # parameters=[islab_control_yaml],
+        )
     ])
