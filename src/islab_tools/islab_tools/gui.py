@@ -26,7 +26,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QTextEdit,
 )
-from PyQt5.QtCore import QTimer, pyqtSignal
+from PyQt5.QtCore import QTimer, pyqtSignal, Qt
+from PyQt5.QtGui import QFont
 
 # --- Flight Modes (simplified) ---
 MODES = [
@@ -44,38 +45,14 @@ HANDLE = [
 
 # --- PX4 Navigation state mapping (id -> name) ---
 NAV_STATE_NAMES = {
-    0:  "MANUAL",
-    1:  "ALTCTL",
-    2:  "POSCTL",
-    3:  "AUTO_MISSION",
-    4:  "AUTO_LOITER",
-    5:  "AUTO_RTL",
-    6:  "POSITION_SLOW",
-    7:  "FREE5",
-    8:  "ALTITUDE_CRUISE",
-    9:  "FREE3",
-    10: "ACRO",
-    11: "FREE2",
-    12: "DESCEND",
-    13: "TERMINATION",
-    14: "OFFBOARD",
-    15: "STAB",
-    16: "FREE1",
-    17: "AUTO_TAKEOFF",
-    18: "AUTO_LAND",
-    19: "AUTO_FOLLOW_TARGET",
-    20: "AUTO_PRECLAND",
-    21: "ORBIT",
-    22: "AUTO_VTOL_TAKEOFF",
-    23: "EXTERNAL1",
-    24: "EXTERNAL2",
-    25: "EXTERNAL3",
-    26: "EXTERNAL4",
-    27: "EXTERNAL5",
-    28: "EXTERNAL6",
-    29: "EXTERNAL7",
-    30: "EXTERNAL8",
-    31: "MAX",
+    0:  "MANUAL", 1:  "ALTCTL", 2:  "POSCTL", 3:  "AUTO_MISSION", 4:  "AUTO_LOITER",
+    5:  "AUTO_RTL", 6:  "POSITION_SLOW", 7:  "FREE5", 8:  "ALTITUDE_CRUISE",
+    9:  "FREE3", 10: "ACRO", 11: "FREE2", 12: "DESCEND", 13: "TERMINATION",
+    14: "OFFBOARD", 15: "STAB", 16: "FREE1", 17: "AUTO_TAKEOFF", 18: "AUTO_LAND",
+    19: "AUTO_FOLLOW_TARGET", 20: "AUTO_PRECLAND", 21: "ORBIT",
+    22: "AUTO_VTOL_TAKEOFF", 23: "EXTERNAL1", 24: "EXTERNAL2", 25: "EXTERNAL3",
+    26: "EXTERNAL4", 27: "EXTERNAL5", 28: "EXTERNAL6", 29: "EXTERNAL7",
+    30: "EXTERNAL8", 31: "MAX",
 }
 
 class IslabChangeModePublisher(Node):
@@ -86,6 +63,24 @@ class IslabChangeModePublisher(Node):
 
     def __init__(self):
         super().__init__("islab_change_mode_publisher")
+
+        # ---------- UI parameters (ROS 2) ----------
+        self.declare_parameter("always_on_top", True)
+        self.declare_parameter("font_scale", 1.4)  # scales big score/time labels
+        self.declare_parameter("window_pos", "top-right")  # top-right | top-left
+        self.declare_parameter("window_width", 560)
+        self.declare_parameter("window_height", 600)
+        self.declare_parameter("show_alarm_rule_height", False)
+
+        # Expose as a dict for GUI
+        self.ui_cfg = dict(
+            always_on_top = bool(self.get_parameter("always_on_top").value),
+            font_scale     = float(self.get_parameter("font_scale").value),
+            window_pos     = str(self.get_parameter("window_pos").value).lower(),
+            window_width   = int(self.get_parameter("window_width").value),
+            window_height  = int(self.get_parameter("window_height").value),
+            show_alarm_rule_height = bool(self.get_parameter("show_alarm_rule_height").value),
+        )
 
         # --- Publishers QoS ---
         self.qos_profile_pub = QoSProfile(
@@ -107,7 +102,7 @@ class IslabChangeModePublisher(Node):
 
         # Score fields (display in GUI)
         self.total_score = None
-        self.score_point = None
+        self.score_point = None  # kept for compatibility if you publish it later
         self.time_total = None
         self.alarm_rule_height = None
         self.score_update_callback = None
@@ -138,20 +133,17 @@ class IslabChangeModePublisher(Node):
         self.get_logger().info("IslabChangeModePublisher started")
 
     # -------------------- PUBLISHERS -------------------- #
-
     def send_mode(self, mode: int, altitude: float, arm: int, handle: int):
         """Publish IslabChangeMode. Source is fixed to 0."""
         msg = IslabChangeMode()
         now_us = int(time.time() * 1e6)
         msg.timestamp = now_us
         msg.timestamp_sample = now_us
-
         msg.mode = int(mode)
         msg.source = 0  # Default to GROUND
         msg.altitude = float(altitude)
         msg.arm = int(arm)
         msg.handel = int(handle)
-
         self.publisher_.publish(msg)
         self.get_logger().info(
             f"Published IslabChangeMode: mode={msg.mode}, source={msg.source}, "
@@ -159,10 +151,9 @@ class IslabChangeModePublisher(Node):
         )
 
     # -------------------- SUBSCRIBERS -------------------- #
-
     def score_callback(self, msg: IslabScore):
         self.total_score = msg.total_score
-        self.score_point = msg.score_point
+        self.score_point = msg.score_point  # if your msg has it; harmless if unused
         self.time_total = msg.time_total
         self.alarm_rule_height = msg.alarm_rule_height
 
@@ -220,28 +211,68 @@ class ModeChangerGUI(QWidget):
     def __init__(self, ros_node: IslabChangeModePublisher):
         super().__init__()
         self.ros_node = ros_node
+        cfg = ros_node.ui_cfg
 
         self.setWindowTitle("Islab Mode + Status/Score Monitor")
-        self.setGeometry(300, 300, 560, 600)
+
+        # Always-on-top + size
+        if cfg.get("always_on_top", True):
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.resize(cfg.get("window_width", 560), cfg.get("window_height", 600))
 
         # ================== Layout root ================== #
         root = QVBoxLayout(self)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(8)
 
-        # ---- Vehicle Status ----
+        # ---- TOP BAR: Big score & time on the RIGHT ----
+        topbar = QHBoxLayout()
+        topbar.setContentsMargins(0, 0, 0, 0)
+        topbar.setSpacing(10)
+
+        # Left spacer + vehicle status compact line
         self.status_label = QLabel("Vehicle status: ...")
-        root.addWidget(self.status_label)
+        self.status_label.setTextFormat(Qt.RichText)
+        self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
-        # ---- Score Panel ----
-        score_group = QGroupBox("Score Status")
-        score_layout = QVBoxLayout()
-        self.score_label = QLabel(
-            "<b>Total Score:</b> ...<br>"
-            "<b>Time Total:</b> ...<br>"
-            "<b>Alarm Rule Height:</b> ..."
-        )
-        score_layout.addWidget(self.score_label)
-        score_group.setLayout(score_layout)
-        root.addWidget(score_group)
+        # Big font scaling
+        base_pts = 20  # base point size
+        big_pts = int(base_pts * float(cfg.get("font_scale", 1.4)))
+        bold_font = QFont()
+        bold_font.setPointSize(big_pts)
+        bold_font.setBold(True)
+
+        mono_font = QFont()
+        mono_font.setPointSize(big_pts)
+        mono_font.setBold(True)
+        mono_font.setFamily("Consolas")  # readable time
+
+        # Right-aligned big labels
+        self.big_score = QLabel("Score: 0")
+        self.big_score.setFont(bold_font)
+        self.big_score.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.big_score.setStyleSheet("color:#00aa00;")
+
+        self.big_time = QLabel("Time: 00:00")
+        self.big_time.setFont(mono_font)
+        self.big_time.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.big_time.setStyleSheet("color:#0077cc;")
+
+        # Assemble topbar
+        topbar.addWidget(self.status_label, 1)   # take left space
+        rightbox = QVBoxLayout()
+        rightbox.setSpacing(0)
+        rightbox.setContentsMargins(0, 0, 0, 0)
+        rightbox.addWidget(self.big_score, 0, Qt.AlignRight)
+        rightbox.addWidget(self.big_time, 0, Qt.AlignRight)
+        topbar.addLayout(rightbox, 0)
+        root.addLayout(topbar)
+
+        # ---- (Optional) Alarm rule line under top bar ----
+        if cfg.get("show_alarm_rule_height", False):
+            self.alarm_label = QLabel("<b>Alarm Rule Height:</b> ...")
+            self.alarm_label.setAlignment(Qt.AlignRight)
+            root.addWidget(self.alarm_label)
 
         # ---- Height Panel ----
         height_group = QGroupBox("Altitude")
@@ -310,8 +341,19 @@ class ModeChangerGUI(QWidget):
         self.timer.timeout.connect(self.poll_status)
         self.timer.start(500)
 
-    # -------------------- Button handlers -------------------- #
+        # Initial placement
+        self._place_initial(cfg.get("window_pos", "top-right"))
 
+    # -------------------- placement helper -------------------- #
+    def _place_initial(self, where: str):
+        scr = QApplication.primaryScreen().availableGeometry()
+        w, h = self.frameGeometry().width(), self.frameGeometry().height()
+        if "top-right" in where:
+            self.move(scr.right() - w - 10, scr.top() + 10)
+        elif "top-left" in where:
+            self.move(scr.left() + 10, scr.top() + 10)
+
+    # -------------------- Button handlers -------------------- #
     def on_send_mode_clicked(self):
         mode_val = int(self.mode_combo.currentData())
         altitude = float(self.altitude_spin.value())
@@ -320,7 +362,6 @@ class ModeChangerGUI(QWidget):
         self.ros_node.send_mode(mode_val, altitude, arm, handle_val)
 
     # -------------------- ROS→Qt bridge -------------------- #
-
     def receive_status_update(self, msg: VehicleStatus):
         self.vehicle_status_signal.emit(msg)
 
@@ -334,41 +375,42 @@ class ModeChangerGUI(QWidget):
         self.height_signal.emit(height_m)
 
     # -------------------- Qt slot methods -------------------- #
-
     def _update_vehicle_status(self, msg: VehicleStatus):
         nav_name = NAV_STATE_NAMES.get(int(msg.nav_state), "UNKNOWN")
         status_text = (
-            f"<b>Armed:</b> {bool(msg.arming_state == 2)}<br>"
-            f"<b>Nav State:</b> {nav_name} ({msg.nav_state})<br>"
-            f"<b>System ID:</b> {msg.system_id}<br>"
-            f"<b>Vehicle Type:</b> {msg.vehicle_type}<br>"
+            f"<b>Armed:</b> {bool(msg.arming_state == 2)}  "
+            f"<b>Nav:</b> {nav_name} ({msg.nav_state})  "
+            f"<b>SysID:</b> {msg.system_id}  "
+            f"<b>Type:</b> {msg.vehicle_type}  "
             f"<b>Failsafe:</b> {bool(msg.failsafe)}"
         )
-        self.status_label.setText(f"Vehicle status:<br>{status_text}")
+        self.status_label.setText(status_text)
 
     def _update_score(self, data: dict):
+        # helper
         def v(x):
             return "..." if x is None else str(x)
 
-        # --- Format time_total (seconds → mm:ss (s)) ---
+        # Format time_total (seconds → mm:ss)
         time_val = data.get("time_total", None)
         if time_val is None or time_val == 0:
-            time_str = "00:00 (0s)"
+            time_str = "00:00"
         else:
             try:
                 total_sec = int(time_val)
                 minutes = total_sec // 60
                 seconds = total_sec % 60
-                time_str = f"{minutes:02d}:{seconds:02d} ({total_sec}s)"
+                time_str = f"{minutes:02d}:{seconds:02d}"
             except Exception:
-                time_str = "??:?? (??s)"
+                time_str = "??:??"
 
-        html = (
-            f"<b>Total Score:</b> {v(data.get('total_score'))}<br>"
-            f"<b>Time Total:</b> {time_str}<br>"
-            f"<b>Alarm Rule Height:</b> {v(data.get('alarm_rule_height'))}"
-        )
-        self.score_label.setText(html)
+        # Update big labels (RIGHT TOP)
+        self.big_score.setText(f"Score: {v(data.get('total_score'))}")
+        self.big_time.setText(f"Time: {time_str}")
+
+        # Optional small alarm line
+        if hasattr(self, "alarm_label"):
+            self.alarm_label.setText(f"<b>Alarm Rule Height:</b> {v(data.get('alarm_rule_height'))}")
 
     def _update_height(self, height_m: float):
         try:
@@ -395,7 +437,6 @@ class ModeChangerGUI(QWidget):
         self.log_area.moveCursor(self.log_area.textCursor().End)
 
     # -------------------- Periodic poll -------------------- #
-
     def poll_status(self):
         msg = self.ros_node.vehicle_status
         if msg:
@@ -403,7 +444,6 @@ class ModeChangerGUI(QWidget):
 
 
 # ================== App entrypoint ================== #
-
 def main(args=None):
     rclpy.init(args=args)
     ros_node = IslabChangeModePublisher()

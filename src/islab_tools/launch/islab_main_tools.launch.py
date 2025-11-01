@@ -46,11 +46,11 @@ def generate_launch_description():
             output='log',
             # parameters=[islab_ball_yaml],
         ),
-        Node(
-            package='islab_tools',
-            executable='joy',
-            name='joy',
-            output='log',
-            # parameters=[islab_ball_yaml],
-        ),
+        # Node(
+        #     package='islab_tools',
+        #     executable='joy',
+        #     name='joy',
+        #     output='log',
+        #     # parameters=[islab_ball_yaml],
+        # ),
     ])
