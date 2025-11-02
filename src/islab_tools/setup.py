@@ -36,6 +36,7 @@ setup(
             'score = islab_tools.score:main',
             'read_status_gazebo = islab_tools.read_status_gazebo:main',
             'joy = islab_tools.joy:main',
+            'keyboard_joy = islab_tools.manual_joytick:main',
         ],
     },
 )

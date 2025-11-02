@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import sys
 import time
 import threading
@@ -10,6 +11,7 @@ from rclpy.qos import (
     QoSHistoryPolicy,
     QoSDurabilityPolicy,
 )
+
 from islab_msgs.msg import IslabChangeMode, IslabScore
 from px4_msgs.msg import VehicleStatus, LogMessage, VehicleOdometry
 
@@ -55,6 +57,7 @@ NAV_STATE_NAMES = {
     30: "EXTERNAL8", 31: "MAX",
 }
 
+
 class IslabChangeModePublisher(Node):
     """
     ROS 2 node that publishes IslabChangeMode messages,
@@ -72,7 +75,6 @@ class IslabChangeModePublisher(Node):
         self.declare_parameter("window_height", 600)
         self.declare_parameter("show_alarm_rule_height", False)
 
-        # Expose as a dict for GUI
         self.ui_cfg = dict(
             always_on_top = bool(self.get_parameter("always_on_top").value),
             font_scale     = float(self.get_parameter("font_scale").value),
@@ -100,9 +102,9 @@ class IslabChangeModePublisher(Node):
         self.status_update_callback = None
         self.log_message_callback = None
 
-        # Score fields (display in GUI)
+        # Score fields
         self.total_score = None
-        self.score_point = None  # kept for compatibility if you publish it later
+        self.score_point = None
         self.time_total = None
         self.alarm_rule_height = None
         self.score_update_callback = None
@@ -111,7 +113,7 @@ class IslabChangeModePublisher(Node):
         self.height = None
         self.height_update_callback = None
 
-        # --- Subscriber QoS ---
+        # --- Subscriptions QoS ---
         status_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -134,13 +136,13 @@ class IslabChangeModePublisher(Node):
 
     # -------------------- PUBLISHERS -------------------- #
     def send_mode(self, mode: int, altitude: float, arm: int, handle: int):
-        """Publish IslabChangeMode. Source is fixed to 0."""
+        """Publish IslabChangeMode. Source is fixed to 0 (GROUND)."""
         msg = IslabChangeMode()
         now_us = int(time.time() * 1e6)
         msg.timestamp = now_us
         msg.timestamp_sample = now_us
         msg.mode = int(mode)
-        msg.source = 0  # Default to GROUND
+        msg.source = 0
         msg.altitude = float(altitude)
         msg.arm = int(arm)
         msg.handel = int(handle)
@@ -153,7 +155,8 @@ class IslabChangeModePublisher(Node):
     # -------------------- SUBSCRIBERS -------------------- #
     def score_callback(self, msg: IslabScore):
         self.total_score = msg.total_score
-        self.score_point = msg.score_point  # if your msg has it; harmless if unused
+        if hasattr(msg, "score_point"):
+            self.score_point = msg.score_point
         self.time_total = msg.time_total
         self.alarm_rule_height = msg.alarm_rule_height
 
@@ -172,8 +175,7 @@ class IslabChangeModePublisher(Node):
             self.status_update_callback(msg)
 
     def log_message_cb(self, msg: LogMessage):
-        # msg.text is a fixed-size char array; trim at first NUL
-        log_text = bytes(msg.text).split(b"\x00", 1)[0].decode(errors="ignore")
+        text = bytes(msg.text).split(b"\x00", 1)[0].decode(errors="ignore")
         sev = msg.severity
         if sev <= 2:
             level = "critical"
@@ -187,10 +189,10 @@ class IslabChangeModePublisher(Node):
             level = "debug"
 
         if self.log_message_callback:
-            self.log_message_callback(log_text, level)
+            self.log_message_callback(text, level)
 
     def status_odom_callback(self, msg: VehicleOdometry):
-        """Update and forward height to GUI. PX4 NED: height = -position[2]."""
+        """PX4 NED: height = -position[2]."""
         try:
             self.height = float(-msg.position[2])
             if self.height_update_callback:
@@ -225,18 +227,23 @@ class ModeChangerGUI(QWidget):
         root.setContentsMargins(10, 8, 10, 8)
         root.setSpacing(8)
 
-        # ---- TOP BAR: Big score & time on the RIGHT ----
+        # ---- TOP BAR: status + big score/time ----
         topbar = QHBoxLayout()
         topbar.setContentsMargins(0, 0, 0, 0)
         topbar.setSpacing(10)
 
-        # Left spacer + vehicle status compact line
+        # Doc-style status label
         self.status_label = QLabel("Vehicle status: ...")
         self.status_label.setTextFormat(Qt.RichText)
         self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        # Nice card style
+        self.status_label.setStyleSheet(
+            "QLabel { border:1px solid #e5e7eb; border-radius:8px; padding:8px 10px; background:#fafafa; }"
+        )
+        self.status_label.setMinimumHeight(100)
 
-        # Big font scaling
-        base_pts = 20  # base point size
+        # Big fonts for score/time
+        base_pts = 20
         big_pts = int(base_pts * float(cfg.get("font_scale", 1.4)))
         bold_font = QFont()
         bold_font.setPointSize(big_pts)
@@ -245,9 +252,8 @@ class ModeChangerGUI(QWidget):
         mono_font = QFont()
         mono_font.setPointSize(big_pts)
         mono_font.setBold(True)
-        mono_font.setFamily("Consolas")  # readable time
+        mono_font.setFamily("Consolas")
 
-        # Right-aligned big labels
         self.big_score = QLabel("Score: 0")
         self.big_score.setFont(bold_font)
         self.big_score.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -258,8 +264,7 @@ class ModeChangerGUI(QWidget):
         self.big_time.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.big_time.setStyleSheet("color:#0077cc;")
 
-        # Assemble topbar
-        topbar.addWidget(self.status_label, 1)   # take left space
+        topbar.addWidget(self.status_label, 1)
         rightbox = QVBoxLayout()
         rightbox.setSpacing(0)
         rightbox.setContentsMargins(0, 0, 0, 0)
@@ -268,7 +273,17 @@ class ModeChangerGUI(QWidget):
         topbar.addLayout(rightbox, 0)
         root.addLayout(topbar)
 
-        # ---- (Optional) Alarm rule line under top bar ----
+        # ---- MODE BANNER (large) ----
+        self.mode_banner = QLabel("")
+        banner_font = QFont()
+        banner_font.setPointSize(big_pts + 2)
+        banner_font.setBold(True)
+        self.mode_banner.setFont(banner_font)
+        self.mode_banner.setAlignment(Qt.AlignCenter)
+        self.mode_banner.setStyleSheet("color:#444;")
+        root.addWidget(self.mode_banner)
+
+        # ---- Optional: Alarm rule line ----
         if cfg.get("show_alarm_rule_height", False):
             self.alarm_label = QLabel("<b>Alarm Rule Height:</b> ...")
             self.alarm_label.setAlignment(Qt.AlignRight)
@@ -288,6 +303,11 @@ class ModeChangerGUI(QWidget):
         for name, val in MODES:
             self.mode_combo.addItem(f"{name} ({val})", val)
         root.addWidget(self.mode_combo)
+
+        # Remember last selection + update banner on change
+        self.last_mode_selected = None
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_combo_changed)
+        self.on_mode_combo_changed(self.mode_combo.currentIndex())
 
         # ---- Altitude ----
         root.addWidget(QLabel("Altitude (m):"))
@@ -324,19 +344,18 @@ class ModeChangerGUI(QWidget):
         self.log_area.setMinimumHeight(220)
         root.addWidget(self.log_area)
 
-        # ================== Signals wiring ================== #
+        # ---- Signals wiring (ROS -> Qt) ----
         self.vehicle_status_signal.connect(self._update_vehicle_status)
         self.log_message_signal.connect(self._append_log_message)
         self.score_signal.connect(self._update_score)
         self.height_signal.connect(self._update_height)
 
-        # Register node → GUI callbacks
         self.ros_node.status_update_callback = self.receive_status_update
         self.ros_node.log_message_callback = self.receive_log_message
         self.ros_node.score_update_callback = self.receive_score_update
         self.ros_node.height_update_callback = self.receive_height_update
 
-        # Poll status periodically for UI responsiveness
+        # Timer to refresh vehicle status line
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_status)
         self.timer.start(500)
@@ -353,12 +372,83 @@ class ModeChangerGUI(QWidget):
         elif "top-left" in where:
             self.move(scr.left() + 10, scr.top() + 10)
 
+    # -------------------- Mode banner logic -------------------- #
+    def on_mode_combo_changed(self, idx: int):
+        try:
+            mode_val = int(self.mode_combo.itemData(idx))
+        except Exception:
+            mode_val = None
+        self._update_mode_banner(mode_val)
+
+    def _update_mode_banner(self, mode_val: int | None):
+        if mode_val is None:
+            return
+        if self.last_mode_selected == mode_val:
+            return
+        self.last_mode_selected = mode_val
+
+        # OFFBOARD (4) -> TỰ ĐỘNG; POSHOLD (2) -> BẰNG TAY
+        if mode_val == 4:
+            self.mode_banner.setText("QUÁ TRÌNH ĐIỀU KHIỂN TỰ ĐỘNG")
+            self.mode_banner.setStyleSheet("color:#cc2020;")
+        elif mode_val == 2:
+            self.mode_banner.setText("QUÁ TRÌNH ĐIỀU KHIỂN BẰNG TAY")
+            self.mode_banner.setStyleSheet("color:#0aa27a;")
+        else:
+            self.mode_banner.setText(f"MODE: {self.mode_combo.currentText()}")
+            self.mode_banner.setStyleSheet("color:#444;")
+
+    # -------------------- Doc-style status formatting -------------------- #
+    def _fmt_status_doc(self, msg: VehicleStatus) -> str:
+        nav_name = NAV_STATE_NAMES.get(int(msg.nav_state), "UNKNOWN")
+        armed = (msg.arming_state == 2)
+        failsafe = bool(msg.failsafe)
+
+        armed_html = f"<span style='color:{'#0a7' if armed else '#c00'};font-weight:700;'>{armed}</span>"
+        nav_html = (
+            f"<code style='background:#f3f4f6;padding:1px 6px;border-radius:6px'>{nav_name}</code> "
+            f"<span style='color:#666;'>({int(msg.nav_state)})</span>"
+        )
+        sysid_html = f"{int(msg.system_id)}"
+        type_html = f"{int(msg.vehicle_type)}"
+        failsafe_html = f"<span style='color:{'#c00' if failsafe else '#666'};font-weight:{'700' if failsafe else '600'};'>{failsafe}</span>"
+
+        html = f"""
+        <div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size:12pt; line-height:1.35;">
+          <table style="border-collapse:collapse;">
+            <tr>
+              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Armed</td>
+              <td style="padding:2px 10px;">{armed_html}</td>
+            </tr>
+            <tr>
+              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Nav</td>
+              <td style="padding:2px 10px;">{nav_html}</td>
+            </tr>
+            <tr>
+              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">SysID</td>
+              <td style="padding:2px 10px;">{sysid_html}</td>
+            </tr>
+            <tr>
+              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Type</td>
+              <td style="padding:2px 10px;">{type_html}</td>
+            </tr>
+            <tr>
+              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Failsafe</td>
+              <td style="padding:2px 10px;">{failsafe_html}</td>
+            </tr>
+          </table>
+        </div>
+        """
+        return html
+
     # -------------------- Button handlers -------------------- #
     def on_send_mode_clicked(self):
         mode_val = int(self.mode_combo.currentData())
         altitude = float(self.altitude_spin.value())
         arm = 1 if self.arm_checkbox.isChecked() else 0
         handle_val = int(self.handle_combo.currentData())
+        # ensure banner matches current selection
+        self._update_mode_banner(mode_val)
         self.ros_node.send_mode(mode_val, altitude, arm, handle_val)
 
     # -------------------- ROS→Qt bridge -------------------- #
@@ -376,22 +466,13 @@ class ModeChangerGUI(QWidget):
 
     # -------------------- Qt slot methods -------------------- #
     def _update_vehicle_status(self, msg: VehicleStatus):
-        nav_name = NAV_STATE_NAMES.get(int(msg.nav_state), "UNKNOWN")
-        status_text = (
-            f"<b>Armed:</b> {bool(msg.arming_state == 2)}  "
-            f"<b>Nav:</b> {nav_name} ({msg.nav_state})  "
-            f"<b>SysID:</b> {msg.system_id}  "
-            f"<b>Type:</b> {msg.vehicle_type}  "
-            f"<b>Failsafe:</b> {bool(msg.failsafe)}"
-        )
-        self.status_label.setText(status_text)
+        # Doc-style “label : value” presentation
+        self.status_label.setText(self._fmt_status_doc(msg))
 
     def _update_score(self, data: dict):
-        # helper
         def v(x):
             return "..." if x is None else str(x)
 
-        # Format time_total (seconds → mm:ss)
         time_val = data.get("time_total", None)
         if time_val is None or time_val == 0:
             time_str = "00:00"
@@ -404,11 +485,9 @@ class ModeChangerGUI(QWidget):
             except Exception:
                 time_str = "??:??"
 
-        # Update big labels (RIGHT TOP)
         self.big_score.setText(f"Score: {v(data.get('total_score'))}")
         self.big_time.setText(f"Time: {time_str}")
 
-        # Optional small alarm line
         if hasattr(self, "alarm_label"):
             self.alarm_label.setText(f"<b>Alarm Rule Height:</b> {v(data.get('alarm_rule_height'))}")
 

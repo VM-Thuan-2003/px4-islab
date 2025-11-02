@@ -48,9 +48,9 @@ def generate_launch_description():
         ),
         # Node(
         #     package='islab_tools',
-        #     executable='joy',
-        #     name='joy',
-        #     output='log',
+        #     executable='keyboard_joy',
+        #     name='keyboard_joy',
+        #     output='screen',
         #     # parameters=[islab_ball_yaml],
         # ),
     ])
