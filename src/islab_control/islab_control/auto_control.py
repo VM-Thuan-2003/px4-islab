@@ -3,7 +3,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDur
 from rclpy.node import Node
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
-from islab_msgs.msg import IslabControl, IslabChangeMode, IslabDropBall, StatusDropBall
+from islab_msgs.msg import IslabControl, IslabChangeMode, IslabDropBall, StatusDropBall, IslabFlag
 from px4_msgs.msg import VehicleControlMode, VehicleLocalPosition, VehicleStatus
 import numpy as np
 import math
@@ -64,12 +64,17 @@ class IslabAutoControl(Node):
 
         # Subscribers
         self.create_subscription(StatusDropBall, '/islab/status_dropball', self.drop_status_callback, 10)
+        self.create_subscription(IslabFlag, '/islab/flag_mode', self.flag_mode_callback, self.qos_profile_sub)
         self.create_subscription(Image, '/UAV/bottom/image_raw', self.bottom_camera_callback, 10)
         self.create_subscription(Image, '/UAV/forward/image_raw', self.forward_camera_callback, 10)
         self.create_subscription(VehicleControlMode, '/fmu/out/vehicle_control_mode', self.status_callback, self.qos_profile_sub)
         self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.status_vehicle_callback, self.qos_profile_sub)
         self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.status_mode_callback, self.qos_profile_sub)
         
+        self.is_auto_mode = False
+        self.is_start_auto = False
+        self.is_stop_auto = False
+
         self.frame_down = None
         self.frame_forward = None
 
@@ -465,7 +470,8 @@ class IslabAutoControl(Node):
             return
 
     def main(self):
-        if self.nav_state == 14 or self.nav_state == 17 or self.nav_state == 4:
+        # if self.nav_state == 14 or self.nav_state == 17:
+        if self.is_auto_mode and self.is_start_auto:
             self.process()
 
     def status_mode_callback(self, msg:VehicleStatus):
@@ -487,6 +493,14 @@ class IslabAutoControl(Node):
         except Exception as e:
             self.get_logger().error(f"[Status Vehicle Control] {e}") 
     
+    def flag_mode_callback(self, msg:IslabFlag):
+        try:
+            self.is_auto_mode = msg.flag_auto
+            self.is_start_auto = msg.flag_start_auto
+            self.is_stop_auto = msg.flag_stop_auto
+        except Exception as e:
+            self.get_logger().error(f"[Flag Mode] {e}")
+
     def drop_status_callback(self, msg: StatusDropBall):
         try:
             self.ball_ids = msg.ball_id

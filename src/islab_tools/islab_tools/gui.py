@@ -1,8 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Islab Mode + Status/Score GUI (PyQt5 + ROS 2)
+
+Features
+--------
+- Publish IslabChangeMode (mode/alt/arm/handle)
+- Publish IslabFlag (select AUTO/MANUAL and Start/Stop current mode)
+- Subscribe to VehicleStatus, LogMessage, VehicleOdometry, IslabScore
+- Show big Score/Time, status doc, height, PX4 logs
+- Always-on-top and simple window placement
+
+Conventions
+-----------
+- OFFBOARD (4) is treated as AUTO
+- POSHOLD (2) and LAND (6) as MANUAL
+- /islab/change_mode : IslabChangeMode
+- /islab/flag_mode   : IslabFlag
+"""
+
 import sys
 import time
 import threading
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
@@ -13,6 +33,7 @@ from rclpy.qos import (
 )
 
 from islab_msgs.msg import IslabChangeMode, IslabScore
+from islab_msgs.msg import IslabFlag
 from px4_msgs.msg import VehicleStatus, LogMessage, VehicleOdometry
 
 from PyQt5.QtWidgets import (
@@ -33,9 +54,9 @@ from PyQt5.QtGui import QFont
 
 # --- Flight Modes (simplified) ---
 MODES = [
-    ("POSHOLD", 2),
-    ("OFFBOARD", 4),
-    ("LAND", 6),
+    ("POSHOLD", 2),   # manual
+    ("OFFBOARD", 4),  # auto
+    ("LAND", 6),      # manual/stop
 ]
 
 # --- Operation handle types ---
@@ -58,10 +79,11 @@ NAV_STATE_NAMES = {
 }
 
 
+# ============================= ROS Node ============================= #
 class IslabChangeModePublisher(Node):
     """
-    ROS 2 node that publishes IslabChangeMode messages,
-    and subscribes to VehicleStatus, PX4 LogMessage, IslabScore, and VehicleOdometry.
+    ROS 2 node that publishes IslabChangeMode and IslabFlag,
+    and subscribes to VehicleStatus, LogMessage, IslabScore, VehicleOdometry.
     """
 
     def __init__(self):
@@ -72,7 +94,7 @@ class IslabChangeModePublisher(Node):
         self.declare_parameter("font_scale", 1.4)  # scales big score/time labels
         self.declare_parameter("window_pos", "top-right")  # top-right | top-left
         self.declare_parameter("window_width", 560)
-        self.declare_parameter("window_height", 600)
+        self.declare_parameter("window_height", 800)
         self.declare_parameter("show_alarm_rule_height", False)
 
         self.ui_cfg = dict(
@@ -84,36 +106,13 @@ class IslabChangeModePublisher(Node):
             show_alarm_rule_height = bool(self.get_parameter("show_alarm_rule_height").value),
         )
 
-        # --- Publishers QoS ---
+        # --- QoS profiles ---
         self.qos_profile_pub = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
         )
-
-        # --- Publisher ---
-        self.publisher_ = self.create_publisher(
-            IslabChangeMode, "islab/change_mode", self.qos_profile_pub
-        )
-
-        # --- State storage and callbacks to GUI ---
-        self.vehicle_status = None
-        self.status_update_callback = None
-        self.log_message_callback = None
-
-        # Score fields
-        self.total_score = None
-        self.score_point = None
-        self.time_total = None
-        self.alarm_rule_height = None
-        self.score_update_callback = None
-
-        # Height (from VehicleOdometry)
-        self.height = None
-        self.height_update_callback = None
-
-        # --- Subscriptions QoS ---
         status_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -126,6 +125,30 @@ class IslabChangeModePublisher(Node):
             depth=1,
         )
 
+        # --- Publishers ---
+        self.change_mode_pub = self.create_publisher(
+            IslabChangeMode, "islab/change_mode", self.qos_profile_pub
+        )
+        self.flag_pub = self.create_publisher(
+            IslabFlag, "/islab/flag_mode", self.qos_profile_pub
+        )
+
+        # --- State and GUI callbacks ---
+        self.vehicle_status = None
+        self.status_update_callback = None
+        aelf = self  # (no-op to avoid lint about unused 'self' name in closures)
+
+        self.log_message_callback = None
+
+        self.total_score = None
+        self.score_point = None
+        self.time_total = None
+        self.alarm_rule_height = None
+        self.score_update_callback = None
+
+        self.height = None
+        self.height_update_callback = None
+
         # --- Subscriptions ---
         self.create_subscription(IslabScore, "/islab/score/status", self.score_callback, 10)
         self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status", self.vehicle_status_cb, status_qos)
@@ -134,7 +157,7 @@ class IslabChangeModePublisher(Node):
 
         self.get_logger().info("IslabChangeModePublisher started")
 
-    # -------------------- PUBLISHERS -------------------- #
+    # -------------------- Publishers -------------------- #
     def send_mode(self, mode: int, altitude: float, arm: int, handle: int):
         """Publish IslabChangeMode. Source is fixed to 0 (GROUND)."""
         msg = IslabChangeMode()
@@ -146,13 +169,42 @@ class IslabChangeModePublisher(Node):
         msg.altitude = float(altitude)
         msg.arm = int(arm)
         msg.handel = int(handle)
-        self.publisher_.publish(msg)
+        self.change_mode_pub.publish(msg)
         self.get_logger().info(
             f"Published IslabChangeMode: mode={msg.mode}, source={msg.source}, "
             f"alt={msg.altitude}, arm={msg.arm}, handle={msg.handel}"
         )
 
-    # -------------------- SUBSCRIBERS -------------------- #
+    def send_flag_auto(
+        self, *,
+        flag_auto=False,
+        flag_start_auto=False,
+        flag_stop_auto=False,
+        flag_manual=False,
+        flag_start_manual=False,
+        flag_stop_manual=False,
+    ):
+        """Publish IslabFlag with explicit booleans."""
+        m = IslabFlag()
+        now_us = int(time.time() * 1e6)
+        m.timestamp = now_us
+        m.timestamp_sample = now_us
+
+        m.flag_auto = bool(flag_auto)
+        m.flag_start_auto = bool(flag_start_auto)
+        m.flag_stop_auto = bool(flag_stop_auto)
+        m.flag_manual = bool(flag_manual)
+        m.flag_start_manual = bool(flag_start_manual)
+        m.flag_stop_manual = bool(flag_stop_manual)
+
+        self.flag_pub.publish(m)
+        self.get_logger().info(
+            "Published IslabFlag("
+            f"auto={m.flag_auto}, start_auto={m.flag_start_auto}, stop_auto={m.flag_stop_auto}, "
+            f"manual={m.flag_manual}, start_manual={m.flag_start_manual}, stop_manual={m.flag_stop_manual})"
+        )
+
+    # -------------------- Subscribers -------------------- #
     def score_callback(self, msg: IslabScore):
         self.total_score = msg.total_score
         if hasattr(msg, "score_point"):
@@ -201,6 +253,7 @@ class IslabChangeModePublisher(Node):
             self.get_logger().error(f"[Status Odometry] {e}")
 
 
+# ============================= GUI ============================= #
 class ModeChangerGUI(QWidget):
     """PyQt5 GUI that interacts with IslabChangeModePublisher."""
 
@@ -220,7 +273,7 @@ class ModeChangerGUI(QWidget):
         # Always-on-top + size
         if cfg.get("always_on_top", True):
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.resize(cfg.get("window_width", 560), cfg.get("window_height", 600))
+        self.resize(cfg.get("window_width", 560), cfg.get("window_height", 800))
 
         # ================== Layout root ================== #
         root = QVBoxLayout(self)
@@ -236,7 +289,6 @@ class ModeChangerGUI(QWidget):
         self.status_label = QLabel("Vehicle status: ...")
         self.status_label.setTextFormat(Qt.RichText)
         self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        # Nice card style
         self.status_label.setStyleSheet(
             "QLabel { border:1px solid #e5e7eb; border-radius:8px; padding:8px 10px; background:#fafafa; }"
         )
@@ -304,10 +356,7 @@ class ModeChangerGUI(QWidget):
             self.mode_combo.addItem(f"{name} ({val})", val)
         root.addWidget(self.mode_combo)
 
-        # Remember last selection + update banner on change
         self.last_mode_selected = None
-        self.mode_combo.currentIndexChanged.connect(self.on_mode_combo_changed)
-        self.on_mode_combo_changed(self.mode_combo.currentIndex())
 
         # ---- Altitude ----
         root.addWidget(QLabel("Altitude (m):"))
@@ -332,10 +381,24 @@ class ModeChangerGUI(QWidget):
             self.handle_combo.addItem(f"{name} ({val})", val)
         root.addWidget(self.handle_combo)
 
-        # ---- Mode/Arm/Takeoff Button ----
-        self.mode_button = QPushButton("Send Mode / Takeoff / Arm")
-        self.mode_button.clicked.connect(self.on_send_mode_clicked)
-        root.addWidget(self.mode_button)
+        # ---- Buttons row (create BEFORE hooking mode change) ----
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        # COMBINED BUTTON: send IslabChangeMode + IslabFlag
+        self.apply_btn = QPushButton("Apply (Mode + Flag)")
+        self.apply_btn.setToolTip("Send IslabChangeMode then IslabFlag based on selection")
+        self.apply_btn.clicked.connect(self.on_apply_clicked)
+        btn_row.addWidget(self.apply_btn)
+
+        # Start/Stop button (giữ nguyên)
+        self.starting = False  # False: next click => Start
+        self.start_stop_btn = QPushButton("Start")
+        self.start_stop_btn.setToolTip("Start/Stop current selected mode via IslabFlag")
+        self.start_stop_btn.clicked.connect(self.on_start_stop_clicked)
+        btn_row.addWidget(self.start_stop_btn)
+
+        root.addLayout(btn_row)
 
         # ---- PX4 Log ----
         root.addWidget(QLabel("PX4 Log:"))
@@ -354,6 +417,10 @@ class ModeChangerGUI(QWidget):
         self.ros_node.log_message_callback = self.receive_log_message
         self.ros_node.score_update_callback = self.receive_score_update
         self.ros_node.height_update_callback = self.receive_height_update
+
+        # --- Connect AFTER creating buttons to avoid attribute errors
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_combo_changed)
+        self.on_mode_combo_changed(self.mode_combo.currentIndex())
 
         # Timer to refresh vehicle status line
         self.timer = QTimer(self)
@@ -378,7 +445,11 @@ class ModeChangerGUI(QWidget):
             mode_val = int(self.mode_combo.itemData(idx))
         except Exception:
             mode_val = None
+
         self._update_mode_banner(mode_val)
+        # Reset Start/Stop
+        self.starting = False
+        self.start_stop_btn.setText("Start")
 
     def _update_mode_banner(self, mode_val: int | None):
         if mode_val is None:
@@ -387,7 +458,7 @@ class ModeChangerGUI(QWidget):
             return
         self.last_mode_selected = mode_val
 
-        # OFFBOARD (4) -> TỰ ĐỘNG; POSHOLD (2) -> BẰNG TAY
+        # OFFBOARD (4) -> AUTO; POSHOLD (2) -> MANUAL
         if mode_val == 4:
             self.mode_banner.setText("QUÁ TRÌNH ĐIỀU KHIỂN TỰ ĐỘNG")
             self.mode_banner.setStyleSheet("color:#cc2020;")
@@ -416,40 +487,96 @@ class ModeChangerGUI(QWidget):
         html = f"""
         <div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size:12pt; line-height:1.35;">
           <table style="border-collapse:collapse;">
-            <tr>
-              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Armed</td>
-              <td style="padding:2px 10px;">{armed_html}</td>
-            </tr>
-            <tr>
-              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Nav</td>
-              <td style="padding:2px 10px;">{nav_html}</td>
-            </tr>
-            <tr>
-              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">SysID</td>
-              <td style="padding:2px 10px;">{sysid_html}</td>
-            </tr>
-            <tr>
-              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Type</td>
-              <td style="padding:2px 10px;">{type_html}</td>
-            </tr>
-            <tr>
-              <td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Failsafe</td>
-              <td style="padding:2px 10px;">{failsafe_html}</td>
-            </tr>
+            <tr><td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Armed</td>
+                <td style="padding:2px 10px;">{armed_html}</td></tr>
+            <tr><td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Nav</td>
+                <td style="padding:2px 10px;">{nav_html}</td></tr>
+            <tr><td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">SysID</td>
+                <td style="padding:2px 10px;">{sysid_html}</td></tr>
+            <tr><td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Type</td>
+                <td style="padding:2px 10px;">{type_html}</td></tr>
+            <tr><td style="padding:2px 10px; color:#444; font-weight:700; white-space:nowrap;">Failsafe</td>
+                <td style="padding:2px 10px;">{failsafe_html}</td></tr>
           </table>
         </div>
         """
         return html
 
     # -------------------- Button handlers -------------------- #
-    def on_send_mode_clicked(self):
+    def on_apply_clicked(self):
+        """
+        One-click: send IslabChangeMode THEN IslabFlag (select)
+        """
         mode_val = int(self.mode_combo.currentData())
         altitude = float(self.altitude_spin.value())
         arm = 1 if self.arm_checkbox.isChecked() else 0
         handle_val = int(self.handle_combo.currentData())
-        # ensure banner matches current selection
+
+        # 1) Send IslabChangeMode
         self._update_mode_banner(mode_val)
         self.ros_node.send_mode(mode_val, altitude, arm, handle_val)
+
+        # 2) Send IslabFlag SELECT according to mode
+        if mode_val == 4:  # OFFBOARD => AUTO
+            self.ros_node.send_flag_auto(
+                flag_auto=True,
+                flag_start_auto=False, flag_stop_auto=False,
+                flag_manual=False,
+                flag_start_manual=False, flag_stop_manual=False
+            )
+        else:               # POSHOLD/LAND => MANUAL
+            self.ros_node.send_flag_auto(
+                flag_auto=False,
+                flag_start_auto=False, flag_stop_auto=False,
+                flag_manual=True,
+                flag_start_manual=False, flag_stop_manual=False
+            )
+
+    def on_start_stop_clicked(self):
+        """
+        Toggle start/stop for the current selection.
+        - OFFBOARD (4): use flag_start_auto / flag_stop_auto
+        - Else:         use flag_start_manual / flag_stop_manual
+        """
+        mode_val = int(self.mode_combo.currentData())
+        is_auto = (mode_val == 4)
+
+        if not self.starting:
+            # START
+            if is_auto:
+                self.ros_node.send_flag_auto(
+                    flag_auto=True,
+                    flag_start_auto=True, flag_stop_auto=False,
+                    flag_manual=False,
+                    flag_start_manual=False, flag_stop_manual=False
+                )
+            else:
+                self.ros_node.send_flag_auto(
+                    flag_auto=False,
+                    flag_start_auto=False, flag_stop_auto=False,
+                    flag_manual=True,
+                    flag_start_manual=True, flag_stop_manual=False
+                )
+            self.start_stop_btn.setText("Stop")
+            self.starting = True
+        else:
+            # STOP
+            if is_auto:
+                self.ros_node.send_flag_auto(
+                    flag_auto=True,
+                    flag_start_auto=False, flag_stop_auto=True,
+                    flag_manual=False,
+                    flag_start_manual=False, flag_stop_manual=False
+                )
+            else:
+                self.ros_node.send_flag_auto(
+                    flag_auto=False,
+                    flag_start_auto=False, flag_stop_auto=False,
+                    flag_manual=True,
+                    flag_start_manual=False, flag_stop_manual=True
+                )
+            self.start_stop_btn.setText("Start")
+            self.starting = False
 
     # -------------------- ROS→Qt bridge -------------------- #
     def receive_status_update(self, msg: VehicleStatus):
@@ -466,7 +593,6 @@ class ModeChangerGUI(QWidget):
 
     # -------------------- Qt slot methods -------------------- #
     def _update_vehicle_status(self, msg: VehicleStatus):
-        # Doc-style “label : value” presentation
         self.status_label.setText(self._fmt_status_doc(msg))
 
     def _update_score(self, data: dict):
@@ -522,7 +648,7 @@ class ModeChangerGUI(QWidget):
             self.vehicle_status_signal.emit(msg)
 
 
-# ================== App entrypoint ================== #
+# ============================= Entrypoint ============================= #
 def main(args=None):
     rclpy.init(args=args)
     ros_node = IslabChangeModePublisher()
