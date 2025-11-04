@@ -57,6 +57,15 @@ class BringUp(Node):
             self.get_logger().error('"make" not found in PATH')
             return
 
+        # --- Kill any existing Gazebo processes ---
+        self.get_logger().info('Killing any existing Gazebo processes...')
+        try:
+            subprocess.run(['pkill', '-9', 'gzserver'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['pkill', '-9', 'gzclient'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.get_logger().info('Existing gzserver/gzclient processes terminated (if any).')
+        except Exception as e:
+            self.get_logger().warning(f'Failed to kill Gazebo processes: {e}')
+
         # Example: make px4_sitl gazebo-classic_<model>__<world>
         target = f'gazebo-classic_{self.model_name}__{self.world_name}'
         cmd = ['make', 'px4_sitl', target]

@@ -65,8 +65,8 @@ class IslabAutoControl(Node):
         # Subscribers
         self.create_subscription(StatusDropBall, '/islab/status_dropball', self.drop_status_callback, 10)
         self.create_subscription(IslabFlag, '/islab/flag_mode', self.flag_mode_callback, self.qos_profile_sub)
-        self.create_subscription(Image, '/UAV/bottom/image_raw', self.bottom_camera_callback, 10)
-        self.create_subscription(Image, '/UAV/forward/image_raw', self.forward_camera_callback, 10)
+        self.create_subscription(Image, '/islab/down_camera/image_raw', self.bottom_camera_callback, 10)
+        self.create_subscription(Image, '/islab/forward_camera/image_raw', self.forward_camera_callback, 10)
         self.create_subscription(VehicleControlMode, '/fmu/out/vehicle_control_mode', self.status_callback, self.qos_profile_sub)
         self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.status_vehicle_callback, self.qos_profile_sub)
         self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.status_mode_callback, self.qos_profile_sub)
@@ -97,18 +97,25 @@ class IslabAutoControl(Node):
         self.fps = 200.0 
         
         self.status_stage = {
+            "start":{
+                "time": 0.0,
+                "status": False,
+            },
             "yaw": {
                 "1": {
                     "time": 0.0,
                     "status": False,
+                    "count": 0,
                 },
                 "2": {
                     "time": 0.0,
                     "status": False,
+                    "count": 0,
                 },
                 "3": {
                     "time": 0.0,
                     "status": False,
+                    "count": 0,
                 },
             },
             "forward": {
@@ -260,14 +267,15 @@ class IslabAutoControl(Node):
         if math.fabs(error_altitude) < 1.0 or current_altitude > altitude_target:
             for i in range(10):
                 self.send_change_mode(mode=4, handel=0)
+            self.status_stage["start"]["time"] = time()
             return True
         else:
-            self.count_check += 1
-            if self.count_check == 100:
-                self.count_check = 0
-                for i in range(10):
-                    self.send_change_mode(mode=4, handel=0)
-                return True
+            # self.count_check += 1
+            # if self.count_check == 500:
+            #     self.count_check = 0
+            #     for i in range(10):
+            #         self.send_change_mode(mode=4, handel=0)
+            #     return True
             return False
     
     def process(self):
@@ -278,9 +286,21 @@ class IslabAutoControl(Node):
         current_altitude = - self.local_position.z
         self.velocity_cmd["z"] = - self.altitude_pid.compute(self.altitude_target, current_altitude)
         
-        if self.status_stage["yaw"]["1"]["status"] is False:
+        if self.status_stage["start"]["status"] is False:
+            curr_time = time()
+            hold_time = 10  # seconds
+            elapsed = curr_time - self.status_stage["start"]["time"]
+
+            if elapsed < hold_time:
+                pass
+            else:
+                self.status_stage["start"]["time"] = curr_time
+                self.status_stage["start"]["status"] = True
+            self.send_velocity()
+            return
+        elif self.status_stage["yaw"]["1"]["status"] is False:
             yaw_speed = 30
-            self.yaw_target = -90
+            self.yaw_target = 90
             error_yaw = self.yaw_target - math.degrees(self.local_position.heading)
             if error_yaw < 0:
                 # rotate left
@@ -289,14 +309,17 @@ class IslabAutoControl(Node):
                 # rotate right
                 self.velocity_cmd["yaw"] = yaw_speed
             if math.fabs(error_yaw) < 4.0:
-                self.velocity_cmd["yaw"] = 0.0
-                self.status_stage["yaw"]["1"]["status"] = True
-                self.status_stage["forward"]["1"]["time"] = time()
+                self.status_stage["yaw"]["1"]["count"] += 1
+                if self.status_stage["yaw"]["1"]["count"] > 10:
+                    self.status_stage["yaw"]["1"]["time"] = time()
+                    self.velocity_cmd["yaw"] = 0.0
+                    self.status_stage["yaw"]["1"]["status"] = True
+                    self.status_stage["forward"]["1"]["time"] = time()
             self.send_velocity()
             return
         elif self.status_stage["forward"]["1"]["status"] is False:
             curr_time = time()
-            distance_target = 2.0  # meters
+            distance_target = 3.3  # meters
             velocity_forward = 0.5 # m/s
             if curr_time - self.status_stage["forward"]["1"]["time"] < distance_target / velocity_forward:
                 self.velocity_cmd["x"] = - velocity_forward
@@ -356,7 +379,7 @@ class IslabAutoControl(Node):
             return
         elif self.status_stage["left"]["1"]["status"] is False:
             curr_time = time()
-            distance_target = 2.5 # meters
+            distance_target = 3.0 # meters
             velocity_left = 0.5 # m/s
             if curr_time - self.status_stage["left"]["1"]["time"] < distance_target / velocity_left:
                 self.velocity_cmd["x"] = 0.0
@@ -386,7 +409,7 @@ class IslabAutoControl(Node):
             return
         elif self.status_stage["right"]["1"]["status"] is False:
             curr_time = time()
-            distance_target = 5 # meters
+            distance_target = 6.0 # meters
             velocity_right = 0.5 # m/s
             if curr_time - self.status_stage["right"]["1"]["time"] < distance_target / velocity_right:
                 self.velocity_cmd["x"] = 0.0
@@ -416,7 +439,7 @@ class IslabAutoControl(Node):
             return
         elif self.status_stage["left"]["2"]["status"] is False:
             curr_time = time()
-            distance_target = 2.5 # meters
+            distance_target = 3.0 # meters
             velocity_left = 0.5 # m/s
             if curr_time - self.status_stage["left"]["2"]["time"] < distance_target / velocity_left:
                 self.velocity_cmd["x"] = 0.0

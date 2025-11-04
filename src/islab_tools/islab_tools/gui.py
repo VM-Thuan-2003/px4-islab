@@ -3,25 +3,16 @@
 """
 Islab Mode + Status/Score GUI (PyQt5 + ROS 2)
 
-Features
---------
-- Publish IslabChangeMode (mode/alt/arm/handle)
-- Publish IslabFlag (select AUTO/MANUAL and Start/Stop current mode)
-- Subscribe to VehicleStatus, LogMessage, VehicleOdometry, IslabScore
-- Show big Score/Time, status doc, height, PX4 logs
-- Always-on-top and simple window placement
-
-Conventions
------------
-- OFFBOARD (4) is treated as AUTO
-- POSHOLD (2) and LAND (6) as MANUAL
-- /islab/change_mode : IslabChangeMode
-- /islab/flag_mode   : IslabFlag
+Layout (no tabs)
+----------------
+[ BIG Overview image (left, auto-scale) ]  |  [ Control panel (right) ]
 """
 
 import sys
 import time
 import threading
+import numpy as np
+import cv2
 
 import rclpy
 from rclpy.node import Node
@@ -35,6 +26,8 @@ from rclpy.qos import (
 from islab_msgs.msg import IslabChangeMode, IslabScore
 from islab_msgs.msg import IslabFlag
 from px4_msgs.msg import VehicleStatus, LogMessage, VehicleOdometry
+from sensor_msgs.msg import Image as RosImage
+from cv_bridge import CvBridge
 
 from PyQt5.QtWidgets import (
     QApplication,
@@ -48,9 +41,10 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QTextEdit,
+    QSizePolicy,
 )
-from PyQt5.QtCore import QTimer, pyqtSignal, Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import QTimer, pyqtSignal, Qt, QSize
+from PyQt5.QtGui import QFont, QImage, QPixmap
 
 # --- Flight Modes (simplified) ---
 MODES = [
@@ -82,8 +76,7 @@ NAV_STATE_NAMES = {
 # ============================= ROS Node ============================= #
 class IslabChangeModePublisher(Node):
     """
-    ROS 2 node that publishes IslabChangeMode and IslabFlag,
-    and subscribes to VehicleStatus, LogMessage, IslabScore, VehicleOdometry.
+    Publishes IslabChangeMode/IslabFlag; subscribes VehicleStatus/Log/Score/Odometry/Image.
     """
 
     def __init__(self):
@@ -91,10 +84,10 @@ class IslabChangeModePublisher(Node):
 
         # ---------- UI parameters (ROS 2) ----------
         self.declare_parameter("always_on_top", True)
-        self.declare_parameter("font_scale", 1.4)  # scales big score/time labels
+        self.declare_parameter("font_scale", 1.4)
         self.declare_parameter("window_pos", "top-right")  # top-right | top-left
-        self.declare_parameter("window_width", 560)
-        self.declare_parameter("window_height", 800)
+        self.declare_parameter("window_width", 960)
+        self.declare_parameter("window_height", 720)
         self.declare_parameter("show_alarm_rule_height", False)
 
         self.ui_cfg = dict(
@@ -136,8 +129,6 @@ class IslabChangeModePublisher(Node):
         # --- State and GUI callbacks ---
         self.vehicle_status = None
         self.status_update_callback = None
-        aelf = self  # (no-op to avoid lint about unused 'self' name in closures)
-
         self.log_message_callback = None
 
         self.total_score = None
@@ -149,17 +140,30 @@ class IslabChangeModePublisher(Node):
         self.height = None
         self.height_update_callback = None
 
+        # Image callback for Overview
+        self.image_update_callback = None
+        self.bridge = CvBridge()
+
         # --- Subscriptions ---
         self.create_subscription(IslabScore, "/islab/score/status", self.score_callback, 10)
         self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status", self.vehicle_status_cb, status_qos)
         self.create_subscription(LogMessage, "/fmu/out/log_message", self.log_message_cb, status_qos)
         self.create_subscription(VehicleOdometry, "/fmu/out/vehicle_odometry", self.status_odom_callback, self.qos_profile_sub)
 
+        # Overview image (best-effort)
+        self.create_subscription(
+            RosImage, "/islab/overview/image_raw", self.image_cb,
+            QoSProfile(
+                reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                history=QoSHistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+        )
+
         self.get_logger().info("IslabChangeModePublisher started")
 
     # -------------------- Publishers -------------------- #
     def send_mode(self, mode: int, altitude: float, arm: int, handle: int):
-        """Publish IslabChangeMode. Source is fixed to 0 (GROUND)."""
         msg = IslabChangeMode()
         now_us = int(time.time() * 1e6)
         msg.timestamp = now_us
@@ -184,7 +188,6 @@ class IslabChangeModePublisher(Node):
         flag_start_manual=False,
         flag_stop_manual=False,
     ):
-        """Publish IslabFlag with explicit booleans."""
         m = IslabFlag()
         now_us = int(time.time() * 1e6)
         m.timestamp = now_us
@@ -252,16 +255,25 @@ class IslabChangeModePublisher(Node):
         except Exception as e:
             self.get_logger().error(f"[Status Odometry] {e}")
 
+    def image_cb(self, msg: RosImage):
+        try:
+            frame_bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            if self.image_update_callback:
+                self.image_update_callback(frame_bgr)
+        except Exception as e:
+            self.get_logger().warning(f"image_cb error: {e}")
+
 
 # ============================= GUI ============================= #
 class ModeChangerGUI(QWidget):
-    """PyQt5 GUI that interacts with IslabChangeModePublisher."""
+    """Single-window GUI: left big image, right control panel."""
 
     # Thread-safe signals from ROS thread -> Qt main thread
     vehicle_status_signal = pyqtSignal(object)
     log_message_signal = pyqtSignal(str, str)
     score_signal = pyqtSignal(object)
     height_signal = pyqtSignal(float)
+    image_signal = pyqtSignal(object)  # np.ndarray (BGR)
 
     def __init__(self, ros_node: IslabChangeModePublisher):
         super().__init__()
@@ -273,12 +285,32 @@ class ModeChangerGUI(QWidget):
         # Always-on-top + size
         if cfg.get("always_on_top", True):
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.resize(cfg.get("window_width", 560), cfg.get("window_height", 800))
+        self.resize(cfg.get("window_width", 960), cfg.get("window_height", 720))
 
-        # ================== Layout root ================== #
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 8, 10, 8)
-        root.setSpacing(8)
+        # ================== Root (no tabs) ================== #
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(10)
+
+        # ---------- LEFT: Big image ----------
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(6)
+
+        self.image_label = QLabel("Waiting for /islab/overview/image_raw ...")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.image_label.setMinimumSize(QSize(480, 360))
+        self.image_label.setStyleSheet(
+            "QLabel { background:#0b0b0b; color:#9aa0a6; border:1px solid #2d2d2d; border-radius:8px; }"
+        )
+        self._last_qimage = None
+        left.addWidget(self.image_label, stretch=1)
+
+        # ---------- RIGHT: Control panel (same as trước) ----------
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(8)
 
         # ---- TOP BAR: status + big score/time ----
         topbar = QHBoxLayout()
@@ -323,7 +355,7 @@ class ModeChangerGUI(QWidget):
         rightbox.addWidget(self.big_score, 0, Qt.AlignRight)
         rightbox.addWidget(self.big_time, 0, Qt.AlignRight)
         topbar.addLayout(rightbox, 0)
-        root.addLayout(topbar)
+        right.addLayout(topbar)
 
         # ---- MODE BANNER (large) ----
         self.mode_banner = QLabel("")
@@ -333,13 +365,13 @@ class ModeChangerGUI(QWidget):
         self.mode_banner.setFont(banner_font)
         self.mode_banner.setAlignment(Qt.AlignCenter)
         self.mode_banner.setStyleSheet("color:#444;")
-        root.addWidget(self.mode_banner)
+        right.addWidget(self.mode_banner)
 
         # ---- Optional: Alarm rule line ----
         if cfg.get("show_alarm_rule_height", False):
             self.alarm_label = QLabel("<b>Alarm Rule Height:</b> ...")
             self.alarm_label.setAlignment(Qt.AlignRight)
-            root.addWidget(self.alarm_label)
+            right.addWidget(self.alarm_label)
 
         # ---- Height Panel ----
         height_group = QGroupBox("Altitude")
@@ -347,24 +379,24 @@ class ModeChangerGUI(QWidget):
         self.height_label = QLabel("<b>Height:</b> ... m")
         height_layout.addWidget(self.height_label)
         height_group.setLayout(height_layout)
-        root.addWidget(height_group)
+        right.addWidget(height_group)
 
         # ---- Mode Selection ----
-        root.addWidget(QLabel("Select Mode:"))
+        right.addWidget(QLabel("Select Mode:"))
         self.mode_combo = QComboBox()
         for name, val in MODES:
             self.mode_combo.addItem(f"{name} ({val})", val)
-        root.addWidget(self.mode_combo)
+        right.addWidget(self.mode_combo)
 
         self.last_mode_selected = None
 
         # ---- Altitude ----
-        root.addWidget(QLabel("Altitude (m):"))
+        right.addWidget(QLabel("Altitude (m):"))
         self.altitude_spin = QDoubleSpinBox()
         self.altitude_spin.setRange(-100.0, 500.0)
         self.altitude_spin.setSingleStep(0.5)
         self.altitude_spin.setValue(2.0)
-        root.addWidget(self.altitude_spin)
+        right.addWidget(self.altitude_spin)
 
         # ---- Arm State ----
         arm_group = QGroupBox("Arm State")
@@ -372,53 +404,57 @@ class ModeChangerGUI(QWidget):
         self.arm_checkbox = QCheckBox("Arm (checked=ARM, unchecked=DISARM)")
         arm_layout.addWidget(self.arm_checkbox)
         arm_group.setLayout(arm_layout)
-        root.addWidget(arm_group)
+        right.addWidget(arm_group)
 
         # ---- Handle ----
-        root.addWidget(QLabel("Select Handle:"))
+        right.addWidget(QLabel("Select Handle:"))
         self.handle_combo = QComboBox()
         for name, val in HANDLE:
             self.handle_combo.addItem(f"{name} ({val})", val)
-        root.addWidget(self.handle_combo)
+        right.addWidget(self.handle_combo)
 
-        # ---- Buttons row (create BEFORE hooking mode change) ----
+        # ---- Buttons row ----
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        # COMBINED BUTTON: send IslabChangeMode + IslabFlag
         self.apply_btn = QPushButton("Apply (Mode + Flag)")
         self.apply_btn.setToolTip("Send IslabChangeMode then IslabFlag based on selection")
         self.apply_btn.clicked.connect(self.on_apply_clicked)
         btn_row.addWidget(self.apply_btn)
 
-        # Start/Stop button (giữ nguyên)
-        self.starting = False  # False: next click => Start
+        self.starting = False
         self.start_stop_btn = QPushButton("Start")
         self.start_stop_btn.setToolTip("Start/Stop current selected mode via IslabFlag")
         self.start_stop_btn.clicked.connect(self.on_start_stop_clicked)
         btn_row.addWidget(self.start_stop_btn)
 
-        root.addLayout(btn_row)
+        right.addLayout(btn_row)
 
         # ---- PX4 Log ----
-        root.addWidget(QLabel("PX4 Log:"))
+        right.addWidget(QLabel("PX4 Log:"))
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setMinimumHeight(220)
-        root.addWidget(self.log_area)
+        right.addWidget(self.log_area, stretch=1)
+
+        # ---- Assemble root ----
+        outer.addLayout(left, stretch=3)   # big image area
+        outer.addLayout(right, stretch=2)  # control panel
 
         # ---- Signals wiring (ROS -> Qt) ----
         self.vehicle_status_signal.connect(self._update_vehicle_status)
         self.log_message_signal.connect(self._append_log_message)
         self.score_signal.connect(self._update_score)
         self.height_signal.connect(self._update_height)
+        self.image_signal.connect(self._update_image)
 
         self.ros_node.status_update_callback = self.receive_status_update
         self.ros_node.log_message_callback = self.receive_log_message
         self.ros_node.score_update_callback = self.receive_score_update
         self.ros_node.height_update_callback = self.receive_height_update
+        self.ros_node.image_update_callback = self.receive_image_update
 
-        # --- Connect AFTER creating buttons to avoid attribute errors
+        # --- Connect AFTER creating buttons
         self.mode_combo.currentIndexChanged.connect(self.on_mode_combo_changed)
         self.on_mode_combo_changed(self.mode_combo.currentIndex())
 
@@ -429,6 +465,12 @@ class ModeChangerGUI(QWidget):
 
         # Initial placement
         self._place_initial(cfg.get("window_pos", "top-right"))
+
+    # Keep image nice on window resize
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._last_qimage is not None:
+            self._apply_qimage(self._last_qimage)
 
     # -------------------- placement helper -------------------- #
     def _place_initial(self, where: str):
@@ -447,28 +489,25 @@ class ModeChangerGUI(QWidget):
             mode_val = None
 
         self._update_mode_banner(mode_val)
-        # Reset Start/Stop
         self.starting = False
         self.start_stop_btn.setText("Start")
 
     def _update_mode_banner(self, mode_val: int | None):
-        if mode_val is None:
-            return
-        if self.last_mode_selected == mode_val:
-            return
-        self.last_mode_selected = mode_val
+        """
+        Update the large mode banner text and color.
+        - If mode == 4 (OFFBOARD): show "QUÁ TRÌNH ĐIỀU KHIỂN TỰ ĐỘNG"
+        - Otherwise: show "QUÁ TRÌNH ĐIỀU KHIỂN BẰNG TAY"
+        """
+        is_auto = (mode_val == 4)
 
-        # OFFBOARD (4) -> AUTO; POSHOLD (2) -> MANUAL
-        if mode_val == 4:
+        if is_auto:
+            # Autonomous control process
             self.mode_banner.setText("QUÁ TRÌNH ĐIỀU KHIỂN TỰ ĐỘNG")
             self.mode_banner.setStyleSheet("color:#cc2020;")
-        elif mode_val == 2:
+        else:
+            # Manual control process
             self.mode_banner.setText("QUÁ TRÌNH ĐIỀU KHIỂN BẰNG TAY")
             self.mode_banner.setStyleSheet("color:#0aa27a;")
-        else:
-            self.mode_banner.setText(f"MODE: {self.mode_combo.currentText()}")
-            self.mode_banner.setStyleSheet("color:#444;")
-
     # -------------------- Doc-style status formatting -------------------- #
     def _fmt_status_doc(self, msg: VehicleStatus) -> str:
         nav_name = NAV_STATE_NAMES.get(int(msg.nav_state), "UNKNOWN")
@@ -504,19 +543,14 @@ class ModeChangerGUI(QWidget):
 
     # -------------------- Button handlers -------------------- #
     def on_apply_clicked(self):
-        """
-        One-click: send IslabChangeMode THEN IslabFlag (select)
-        """
         mode_val = int(self.mode_combo.currentData())
         altitude = float(self.altitude_spin.value())
         arm = 1 if self.arm_checkbox.isChecked() else 0
         handle_val = int(self.handle_combo.currentData())
 
-        # 1) Send IslabChangeMode
         self._update_mode_banner(mode_val)
         self.ros_node.send_mode(mode_val, altitude, arm, handle_val)
 
-        # 2) Send IslabFlag SELECT according to mode
         if mode_val == 4:  # OFFBOARD => AUTO
             self.ros_node.send_flag_auto(
                 flag_auto=True,
@@ -533,16 +567,10 @@ class ModeChangerGUI(QWidget):
             )
 
     def on_start_stop_clicked(self):
-        """
-        Toggle start/stop for the current selection.
-        - OFFBOARD (4): use flag_start_auto / flag_stop_auto
-        - Else:         use flag_start_manual / flag_stop_manual
-        """
         mode_val = int(self.mode_combo.currentData())
         is_auto = (mode_val == 4)
 
         if not self.starting:
-            # START
             if is_auto:
                 self.ros_node.send_flag_auto(
                     flag_auto=True,
@@ -560,7 +588,6 @@ class ModeChangerGUI(QWidget):
             self.start_stop_btn.setText("Stop")
             self.starting = True
         else:
-            # STOP
             if is_auto:
                 self.ros_node.send_flag_auto(
                     flag_auto=True,
@@ -590,6 +617,9 @@ class ModeChangerGUI(QWidget):
 
     def receive_height_update(self, height_m: float):
         self.height_signal.emit(height_m)
+
+    def receive_image_update(self, frame_bgr: np.ndarray):
+        self.image_signal.emit(frame_bgr)
 
     # -------------------- Qt slot methods -------------------- #
     def _update_vehicle_status(self, msg: VehicleStatus):
@@ -623,7 +653,39 @@ class ModeChangerGUI(QWidget):
         except Exception:
             self.height_label.setText(f"<b>Height:</b> ... m")
 
+    def _apply_qimage(self, qimg: QImage):
+        """Scale and paint image to the label, keeping aspect ratio and maximizing size."""
+        self._last_qimage = qimg
+        if self.image_label.width() < 2 or self.image_label.height() < 2:
+            return
+        pm = QPixmap.fromImage(qimg)
+        scaled = pm.scaled(
+            self.image_label.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        self.image_label.setPixmap(scaled)
+
+    def _update_image(self, frame_bgr: np.ndarray):
+        try:
+            if frame_bgr.ndim == 2:
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_GRAY2RGB)
+            else:
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame_rgb.shape
+            qimg = QImage(frame_rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+            self._apply_qimage(qimg)
+        except Exception as e:
+            self.image_label.setText(f"Image error: {e}")
+
+    # -------------------- Periodic poll -------------------- #
+    def poll_status(self):
+        msg = self.ros_node.vehicle_status
+        if msg:
+            self.vehicle_status_signal.emit(msg)
+
     def _append_log_message(self, text: str, level: str):
+        """Append a PX4 log line to the QTextEdit with color by severity."""
         color = {
             "critical": "#ff0000",
             "error": "#ff3030",
@@ -638,14 +700,11 @@ class ModeChangerGUI(QWidget):
             f'<span style="color:#888;">[{now}]</span> '
             f'<span style="color:{color};"><b>{level.upper()}</b>: {text}</span>'
         )
-        self.log_area.append(html)
-        self.log_area.moveCursor(self.log_area.textCursor().End)
 
-    # -------------------- Periodic poll -------------------- #
-    def poll_status(self):
-        msg = self.ros_node.vehicle_status
-        if msg:
-            self.vehicle_status_signal.emit(msg)
+        if hasattr(self, "log_area") and self.log_area is not None:
+            self.log_area.append(html)
+            self.log_area.moveCursor(self.log_area.textCursor().End)
+
 
 
 # ============================= Entrypoint ============================= #
