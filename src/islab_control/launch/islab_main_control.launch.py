@@ -23,11 +23,11 @@ def generate_launch_description():
             output='log',
             # parameters=[islab_control_yaml],
         ),
-        # Node(
-        #     package='islab_control',
-        #     executable='joy_to_px4_manual',
-        #     name='joy_to_px4_manual',
-        #     output='log',
-        #     # parameters=[islab_control_yaml],
-        # )
+        Node(
+            package='islab_control',
+            executable='joy_to_px4_manual',
+            name='joy_to_px4_manual',
+            output='log',
+            # parameters=[islab_control_yaml],
+        )
     ])

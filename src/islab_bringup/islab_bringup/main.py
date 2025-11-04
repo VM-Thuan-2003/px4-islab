@@ -15,7 +15,7 @@ class BringUp(Node):
         super().__init__('bringup_node')
         self.get_logger().info('Creating BringUp')
 
-        # --- Defaults (like your original) ---
+        # --- Defaults ---
         curr_path = os.path.dirname(os.path.abspath(__file__))
         default_autopilot_path = os.path.abspath(
             os.path.join(curr_path, '..', '..', '..', '..', '..', '..', '..', 'islab_autopilot')
@@ -42,24 +42,6 @@ class BringUp(Node):
         self._ran = False
         self.create_timer(0.1, self._run_once)
 
-        # Optional: react to param updates at runtime (uncomment if you want)
-        # self.add_on_set_parameters_callback(self._on_params)
-
-    # def _on_params(self, params):
-    #     any_changed = False
-    #     for p in params:
-    #         if p.name == 'world_name' and p.type_ == Parameter.Type.STRING:
-    #             self.world_name = p.value; any_changed = True
-    #         elif p.name == 'model_name' and p.type_ == Parameter.Type.STRING:
-    #             self.model_name = p.value; any_changed = True
-    #         elif p.name == 'autopilot_path' and p.type_ == Parameter.Type.STRING:
-    #             self.autopilot_path = p.value; any_changed = True
-    #     if any_changed:
-    #         self.get_logger().info('Parameters changed — restarting make...')
-    #         self._stop_child()
-    #         self._run_make_async()
-    #     return rclpy.parameter.SetParametersResult(successful=True)
-
     def _run_once(self):
         if self._ran:
             return
@@ -79,10 +61,18 @@ class BringUp(Node):
         target = f'gazebo-classic_{self.model_name}__{self.world_name}'
         cmd = ['make', 'px4_sitl', target]
 
+        # Properly set env vars for PRIME offload (no shell tricks)
+        env = os.environ.copy()
+        env['__NV_PRIME_RENDER_OFFLOAD'] = '1'
+        env['__GLX_VENDOR_LIBRARY_NAME'] = 'nvidia'
+
         self.get_logger().info(f'Running: {" ".join(cmd)} (cwd={self.autopilot_path})')
+        self.get_logger().info(f'With env overrides: __NV_PRIME_RENDER_OFFLOAD=1, __GLX_VENDOR_LIBRARY_NAME=nvidia')
 
         try:
-            # Start a new process group so we can kill all children cleanly
+            # Start a new process group so we can kill all children cleanly (POSIX only)
+            preexec = os.setsid if os.name == 'posix' else None
+
             self._proc = subprocess.Popen(
                 cmd,
                 cwd=self.autopilot_path,
@@ -91,27 +81,29 @@ class BringUp(Node):
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                preexec_fn=os.setsid  # posix only; safe for Ubuntu
+                env=env,
+                preexec_fn=preexec,
             )
         except Exception as e:
             self.get_logger().error(f'Failed to start make: {e}')
             self._proc = None
             return
 
-        # Start a thread to stream output to ROS logger
+        # Stream output to ROS logger
         def _reader():
             try:
+                assert self._proc.stdout is not None
                 for line in self._proc.stdout:
                     line = line.rstrip('\n')
                     if line:
                         self.get_logger().info(line)
             except Exception as e:
-                self.get_logger().warn(f'Log reader stopped: {e}')
+                self.get_logger().warning(f'Log reader stopped: {e}')
 
         self._reader_thread = threading.Thread(target=_reader, daemon=True)
         self._reader_thread.start()
 
-        # Also watch process end in background
+        # Watch process end in background
         def _waiter():
             rc = self._proc.wait()
             self.get_logger().info(f'make exited with code {rc}')
@@ -123,12 +115,15 @@ class BringUp(Node):
             return
         try:
             self.get_logger().info('Stopping make process group...')
-            # Kill the whole group
-            os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+            if os.name == 'posix':
+                # Kill the whole group
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+            else:
+                self._proc.terminate()
         except ProcessLookupError:
             pass
         except Exception as e:
-            self.get_logger().warn(f'Failed to SIGTERM make: {e}')
+            self.get_logger().warning(f'Failed to stop make: {e}')
         finally:
             self._proc = None
 

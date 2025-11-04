@@ -23,8 +23,8 @@ from rclpy.qos import (
 from sensor_msgs.msg import Joy
 
 # --- Behavior constants ---
-STEP   = 0.4    # snap to +/-1 per tap
-DECAY  = 0.02   # smooth return to 0 when no key held
+STEP   = 0.1    # snap to +/-1 per tap
+DECAY  = 0.01   # smooth return to 0 when no key held
 CENTER = 0.0
 
 HELP = """
@@ -50,7 +50,7 @@ class KeyboardJoy(Node):
 
         # --- Parameters ---
         self.declare_parameter("topic", "/joy")
-        self.declare_parameter("rate_hz", 30.0)
+        self.declare_parameter("rate_hz", 200.0)
         self.declare_parameter("num_axes", 4)
         self.declare_parameter("num_buttons", 12)
 
