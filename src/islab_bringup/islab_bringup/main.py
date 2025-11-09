@@ -18,8 +18,10 @@ class BringUp(Node):
         # --- Defaults ---
         curr_path = os.path.dirname(os.path.abspath(__file__))
         default_autopilot_path = os.path.abspath(
-            os.path.join(curr_path, '..', '..', '..', '..', '..', '..', '..', 'islab_autopilot')
+            os.path.join(curr_path, '..', '..', '..', '..', 'islab_autopilot')
         )
+        
+        default_autopilot_path = "/root/ISLAB-PX4-AUTOPILOT/islab_autopilot"
 
         # --- Parameters ---
         self.declare_parameter('world_name', 'contest_1')
