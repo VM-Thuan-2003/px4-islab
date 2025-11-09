@@ -16,4 +16,10 @@ def generate_launch_description():
             output='log',
             parameters=[islab_bringup_yaml],
         ),
+        Node(
+            package='islab_bringup',
+            executable='run_pipeline',
+            name='run_pipeline',
+            output='log',
+        ),
     ])

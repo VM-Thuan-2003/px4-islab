@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import os
 import sys
 import shutil
 import signal
@@ -9,6 +8,86 @@ import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 
+import os
+from typing import Optional
+
+def find_target_in_workspace(
+    current_path: str,
+    target: str,
+    root_marker: str = "ISLAB-PX4-AUTOPILOT",
+    max_up_levels: int = 20,
+    fallback_levels: Optional[int] = 3,
+    ensure_exists: bool = False,
+) -> Optional[str]:
+    """
+    Find and return an absolute path to `root_marker/target` by walking up from current_path.
+    If `root_marker` is not found within `max_up_levels`, a fallback is attempted by going up
+    `fallback_levels` from current_path and joining `target`. If fallback_levels is None,
+    function returns None when marker not found.
+
+    Args:
+        current_path (str): file or directory path to start searching from.
+        target (str): directory or file name to join to the found root.
+        root_marker (str): folder name that identifies the workspace root.
+        max_up_levels (int): maximum number of parent directories to inspect for the root marker.
+        fallback_levels (Optional[int]): if marker not found, go up this many levels and join target.
+                                         If None, do not attempt fallback and return None.
+        ensure_exists (bool): if True and resulting path doesn't exist, create directories (os.makedirs).
+
+    Returns:
+        Optional[str]: absolute path to the joined target, or None if not found and no fallback.
+    """
+
+    # normalize and make absolute
+    path = os.path.abspath(current_path)
+
+    # If the path is a file, use its directory
+    if os.path.isfile(path):
+        path = os.path.dirname(path)
+
+    # split into components to quickly check if marker is in path
+    parts = path.split(os.sep)
+
+    # quick direct check: if marker already in path, compute immediately
+    if root_marker in parts:
+        idx = parts.index(root_marker)
+        root = os.sep.join(parts[: idx + 1 ]) or os.sep
+        result = os.path.join(root, target)
+        result = os.path.abspath(result)
+        if ensure_exists and not os.path.exists(result):
+            os.makedirs(result, exist_ok=True)
+        return result
+
+    # otherwise, walk up step-by-step until we hit filesystem root or max_up_levels
+    cur = path
+    for i in range(max_up_levels):
+        parent = os.path.dirname(cur)
+        if not parent or parent == cur:
+            break  # reached filesystem root
+        # check if parent's name equals marker
+        if os.path.basename(parent) == root_marker:
+            root = parent
+            result = os.path.abspath(os.path.join(root, target))
+            if ensure_exists and not os.path.exists(result):
+                os.makedirs(result, exist_ok=True)
+            return result
+        cur = parent
+
+    # fallback behavior: optionally go up fallback_levels and join target
+    if fallback_levels is not None:
+        cur = path
+        for _ in range(fallback_levels):
+            cur_parent = os.path.dirname(cur)
+            if not cur_parent or cur_parent == cur:
+                break
+            cur = cur_parent
+        result = os.path.abspath(os.path.join(cur, target))
+        if ensure_exists and not os.path.exists(result):
+            os.makedirs(result, exist_ok=True)
+        return result
+
+    # no marker found and no fallback requested
+    return None
 
 class BringUp(Node):
     def __init__(self):
@@ -17,12 +96,8 @@ class BringUp(Node):
 
         # --- Defaults ---
         curr_path = os.path.dirname(os.path.abspath(__file__))
-        default_autopilot_path = os.path.abspath(
-            os.path.join(curr_path, '..', '..', '..', '..', 'islab_autopilot')
-        )
+        default_autopilot_path = find_target_in_workspace(current_path=curr_path, target='islab_autopilot')
         
-        default_autopilot_path = "/root/ISLAB-PX4-AUTOPILOT/islab_autopilot"
-
         # --- Parameters ---
         self.declare_parameter('world_name', 'contest_1')
         self.declare_parameter('model_name', 'islab_contest')

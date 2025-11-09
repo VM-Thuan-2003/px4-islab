@@ -30,7 +30,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'main = islab_bringup.main:main'
+            'main = islab_bringup.main:main',
+            'run_pipeline = islab_bringup.run_pipeline:main',
         ],
     },
 )
