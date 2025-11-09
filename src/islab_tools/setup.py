@@ -35,6 +35,8 @@ setup(
             'drop_ball = islab_tools.drop_ball:main',
             'score = islab_tools.score:main',
             'read_status_gazebo = islab_tools.read_status_gazebo:main',
+            'joy = islab_tools.joy:main',
+            'keyboard_joy = islab_tools.manual_joytick:main',
         ],
     },
 )

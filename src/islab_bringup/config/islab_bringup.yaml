@@ -1,0 +1,4 @@
+bringup_node:
+  ros__parameters:
+    world_name: contest_1
+    model_name: islab_contest

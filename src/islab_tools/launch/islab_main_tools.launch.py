@@ -32,13 +32,13 @@ def generate_launch_description():
             output='log',
             # parameters=[islab_ball_yaml],
         ),
-        # Node(
-        #     package='islab_tools',
-        #     executable='score',
-        #     name='score',
-        #     output='log',
-        #     # parameters=[islab_ball_yaml],
-        # ),
+        Node(
+            package='islab_tools',
+            executable='score',
+            name='score',
+            output='log',
+            # parameters=[islab_ball_yaml],
+        ),
         Node(
             package='islab_tools',
             executable='read_status_gazebo',
@@ -46,4 +46,11 @@ def generate_launch_description():
             output='log',
             # parameters=[islab_ball_yaml],
         ),
+        # Node(
+        #     package='islab_tools',
+        #     executable='keyboard_joy',
+        #     name='keyboard_joy',
+        #     output='screen',
+        #     # parameters=[islab_ball_yaml],
+        # ),
     ])
