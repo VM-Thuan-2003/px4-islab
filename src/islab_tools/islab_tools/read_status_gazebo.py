@@ -11,11 +11,7 @@ from std_msgs.msg import Bool
 
 
 def get_collision_names(st) -> Tuple[str | None, str | None]:
-    """
-    Return a tuple (c1, c2) for a gazebo_msgs/ContactState entry.
-    Some builds expose `collision1_name`/`collision2_name`; others may still have
-    `collision1`/`collision2`. We try both defensively.
-    """
+    """Return collision names in a defensive way."""
     c1 = getattr(st, 'collision1_name', None) or getattr(st, 'collision1', None)
     c2 = getattr(st, 'collision2_name', None) or getattr(st, 'collision2', None)
     return c1, c2
@@ -23,14 +19,17 @@ def get_collision_names(st) -> Tuple[str | None, str | None]:
 
 class ContactListener(Node):
     """
-    Subscribes to multiple Gazebo contact topics and reports start/end events.
-    Also republishes a Bool per topic indicating whether any contact is active.
+    Subscribes to multiple Gazebo contact topics and publishes only filtered contacts:
+
+    RULES:
+    - Home pads (H1, H2): require collision name containing "islab::base_link"
+    - Targets (T1..T5):   require collision name containing "ball"
     """
 
     def __init__(self):
         super().__init__('contact_listener')
 
-        # ---- Parameters (can be overridden in a launch file) ----
+        # ---- Parameters ----
         self.declare_parameter(
             'topics',
             [
@@ -43,41 +42,74 @@ class ContactListener(Node):
                 '/islab/targets/T5/contacts',
             ],
         )
-        self.declare_parameter('end_timeout_s', 0.20)  # debounce for END events
-        self.declare_parameter('log_pairs', True)      # verbose pair logging
+        self.declare_parameter('end_timeout_s', 0.20)
+        self.declare_parameter('log_pairs', True)
 
         topics: List[str] = self.get_parameter('topics').get_parameter_value().string_array_value
         self.end_timeout = float(self.get_parameter('end_timeout_s').value)
         self.log_pairs = bool(self.get_parameter('log_pairs').value)
 
-        # QoS for sensor streams (best effort, keep last)
+        # Filtering rules
+        self.filter_home = "islab::base_link"
+        self.filter_target = "ball"
+
+        # QoS
         qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10,
         )
 
-        # State per topic
+        # States
         self.active_pairs: Dict[str, Set[Tuple[str, str]]] = {t: set() for t in topics}
-        self.last_seen: Dict[Tuple[str, str], float] = {}  # global last-seen timestamps
+        self.last_seen: Dict[Tuple[str, str], float] = {}
         self.topic_contact_state: Dict[str, bool] = {t: False for t in topics}
 
-        # Subscribers and publishers (Bool per topic)
+        # Subscribers and publishers
         self.subs = []
         self.pubs: Dict[str, Any] = {}
         for t in topics:
             self.subs.append(self.create_subscription(
-                ContactsState, t, lambda msg, topic=t: self._on_contact(msg, topic), qos
+                ContactsState, t,
+                lambda msg, topic=t: self._on_contact(msg, topic),
+                qos
             ))
-            out = t.replace('/contacts', '/is_contact')  # e.g., /islab/.../is_contact
+            out = t.replace('/contacts', '/is_contact')
             self.pubs[t] = self.create_publisher(Bool, out, 10)
 
-        # Timer to sweep for ended contacts (debounce)
+        # Timer
         self.timer = self.create_timer(0.05, self._sweep_timeouts)
 
-        self.get_logger().info("ContactListener started.")
-        # for t in topics:
-        #     self.get_logger().info(f"  Listening: {t}")
+        self.get_logger().info("ContactListener with HOME/TARGET filters started.")
+
+    # ------------------------------------------------------------
+
+    def _topic_is_home(self, topic: str) -> bool:
+        return "/home/" in topic
+
+    def _topic_is_target(self, topic: str) -> bool:
+        return "/targets/" in topic
+
+    # ------------------------------------------------------------
+
+    def _contact_pass_filter(self, topic: str, c1: str, c2: str) -> bool:
+        """Apply the correct filter based on topic."""
+
+        c1_l = c1.lower()
+        c2_l = c2.lower()
+
+        # HOME = needs "islab::base_link"
+        if self._topic_is_home(topic):
+            return (self.filter_home.lower() in c1_l) or (self.filter_home.lower() in c2_l)
+
+        # TARGET = needs "ball"
+        if self._topic_is_target(topic):
+            return (self.filter_target.lower() in c1_l) or (self.filter_target.lower() in c2_l)
+
+        # default — accept everything
+        return True
+
+    # ------------------------------------------------------------
 
     def _on_contact(self, msg: ContactsState, topic: str):
         now = time.time()
@@ -86,52 +118,61 @@ class ContactListener(Node):
         for st in msg.states:
             c1, c2 = get_collision_names(st)
             if not c1 or not c2:
-                # Uncomment to debug unexpected message schema:
-                # self.get_logger().warn(f"ContactState missing collision names: {st}")
                 continue
+
+            # Apply filter rule
+            if not self._contact_pass_filter(topic, c1, c2):
+                continue
+
             pair = tuple(sorted([c1, c2]))
             current_pairs.add(pair)
             self.last_seen[pair] = now
 
-        # Detect STARTs
+        # Detect new contacts
         new_pairs = current_pairs - self.active_pairs[topic]
         for p in new_pairs:
             if self.log_pairs:
                 self.get_logger().info(f"[CONTACT START] {topic} — {p}")
+
         if new_pairs:
             self.topic_contact_state[topic] = True
 
-        # Update active pairs now; ENDs will be handled by timeout sweep
+        # Update list
         self.active_pairs[topic].update(current_pairs)
 
-        # Publish Bool state for this topic
-        self._publish_bool(topic, True if self.active_pairs[topic] else False)
+        # Publish current state
+        self._publish_bool(topic, bool(self.active_pairs[topic]))
+
+    # ------------------------------------------------------------
 
     def _sweep_timeouts(self):
-        """Remove pairs not seen for `end_timeout` seconds and emit END events."""
         now = time.time()
+
         for topic, pairs in self.active_pairs.items():
             ended = []
+
             for p in list(pairs):
-                last = self.last_seen.get(p, 0.0)
-                if (now - last) > self.end_timeout:
+                if (now - self.last_seen.get(p, 0)) > self.end_timeout:
                     ended.append(p)
 
             for p in ended:
                 pairs.remove(p)
                 if self.log_pairs:
-                    self.get_logger().info(f"[CONTACT END]   {topic} — {p}")
+                    self.get_logger().info(f"[CONTACT END] {topic} — {p}")
 
-            # Publish Bool reflecting any active contacts for this topic
-            state = True if pairs else False
-            if state != self.topic_contact_state[topic]:
-                self.topic_contact_state[topic] = state
-                self._publish_bool(topic, state)
+            new_state = bool(pairs)
+            if new_state != self.topic_contact_state[topic]:
+                self.topic_contact_state[topic] = new_state
+                self._publish_bool(topic, new_state)
+
+    # ------------------------------------------------------------
 
     def _publish_bool(self, topic: str, state: bool):
         msg = Bool(data=state)
         self.pubs[topic].publish(msg)
 
+
+# ------------------------------------------------------------
 
 def main(args=None):
     rclpy.init(args=args)

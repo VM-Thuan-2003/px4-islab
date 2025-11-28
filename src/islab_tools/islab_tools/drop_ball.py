@@ -123,7 +123,7 @@ class IslabDropball(Node):
 
     def drop_action(self, id, pos):
         try:
-            string_id = str(id)
+            string_id = "ball_" + str(id)
             x, y, z = pos
             with open(self.sdf_path, 'r') as f:
                 sdf_content = f.read().replace("'", "''")

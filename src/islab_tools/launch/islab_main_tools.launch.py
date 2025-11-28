@@ -25,13 +25,13 @@ def generate_launch_description():
             output='log',
             # parameters=[islab_bridge_yaml],
         ),
-        Node(
-            package='islab_tools',
-            executable='drop_ball',
-            name='drop_ball',
-            output='log',
-            # parameters=[islab_ball_yaml],
-        ),
+        # Node(
+        #     package='islab_tools',
+        #     executable='drop_ball',
+        #     name='drop_ball',
+        #     output='log',
+        #     # parameters=[islab_ball_yaml],
+        # ),
         Node(
             package='islab_tools',
             executable='score',
