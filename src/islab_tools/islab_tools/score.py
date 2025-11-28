@@ -165,6 +165,9 @@ class IslabScoreNode(Node):
         self.total_score_scaled: int = 0
         self.score_point_scaled: int = ScoreConfig.TARGET_HIT
 
+        self.scored_H1 = False
+        self.scored_H2 = False
+
         # Timing
         self.time_total: float = 0.0        # seconds (float, internal)
         self._last_time_update: float = time()
@@ -183,7 +186,7 @@ class IslabScoreNode(Node):
         self._prev_h2: bool = False
         self._edges_initialized: bool = False
         self.h1_takeoff_awarded: bool = False
-        self.h2_cooldown_s: float = 0.5
+        self.h2_cooldown_s: float = 2.0
         self._last_h2_award: float = 0.0
 
         # Target cooldown (per target)
@@ -386,11 +389,13 @@ class IslabScoreNode(Node):
         h1_falling = self._prev_h1 and (not self.home_H1_contact)
         h2_rising = (not self._prev_h2) and self.home_H2_contact
 
-        if h1_falling:
-            self._award_takeoff_h1()
+        print(f"h1:{h1_falling} - h2:{h2_rising}")
 
         if h2_rising:
             self._award_land_h2(now)
+            
+        if h1_falling:
+            self._award_takeoff_h1()
 
         self._prev_h1 = self.home_H1_contact
         self._prev_h2 = self.home_H2_contact
@@ -403,8 +408,10 @@ class IslabScoreNode(Node):
             return
         if self.h1_takeoff_awarded:
             return
-
+        
+        self.scored_H1 = True
         self.h1_takeoff_awarded = True
+        self._prev_h2 = False
         self.total_score_scaled += ScoreConfig.TAKEOFF_H1
         logical_score = self.total_score_scaled / ScoreConfig.SCORE_SCALE
         self.get_logger().info(
@@ -414,13 +421,16 @@ class IslabScoreNode(Node):
 
     def _award_land_h2(self, now: float) -> None:
         """Award landing (H2) with cooldown; requires session_active."""
-        if not self.session_active:
+        # if not self.session_active:
+        #     return
+        if not self.scored_H1:
             return
-        if self.home_H1_contact:
+        if self.scored_H2:
             return
         if now - self._last_h2_award < self.h2_cooldown_s:
             return
-
+        
+        self.scored_H2 = True
         self._last_h2_award = now
         self.total_score_scaled += ScoreConfig.LAND_H2
         logical_score = self.total_score_scaled / ScoreConfig.SCORE_SCALE
